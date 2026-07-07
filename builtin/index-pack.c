@@ -1043,8 +1043,73 @@ static struct base_data *make_base(struct object_entry *obj,
 	return base;
 }
 
+struct object_hash_batch;
+
+#ifdef SHA1_MB
+/*
+ * Optional AVX-512 batched hashing of resolved delta objects. Leaf deltas
+ * (those with no delta children of their own) have their oid computation
+ * deferred and batched 16-wide with sha1_mb, which is several times faster
+ * than hashing them one at a time. A leaf's oid is never needed to continue
+ * the traversal, so deferring is safe; we only enable this when the pack has
+ * no ref-deltas (so make_base never needs the oid) and the hash is SHA-1.
+ * The window itself is the shared struct object_hash_batch (see object-file.h).
+ */
+static int use_sha1_mb;
+
+static void sha1_object(const void *data, struct object_entry *obj_entry,
+			unsigned long size, enum object_type type,
+			const struct object_id *oid);
+
+/*
+ * object_hash_batch flush callback: record each leaf's computed oid, run
+ * sha1_object() on it, then free its buffer (the batch owns it). The queued
+ * object_entry is stashed in cookie[]. Never reports an error (sha1_object()
+ * die()s on any problem).
+ */
+static int index_pack_hash_flush(struct object_hash_batch *b,
+				 const struct object_id *computed,
+				 void *cb_data UNUSED)
+{
+	int i;
+
+	for (i = 0; i < b->n; i++) {
+		struct object_entry *obj = b->cookie[i];
+
+		oidcpy(&obj->idx.oid, &computed[i]);
+		sha1_object(b->data[i], NULL, b->size[i], b->type[i],
+			    &obj->idx.oid);
+		free(b->data[i]);
+	}
+	return 0;
+}
+#endif
+
+/* Compute a resolved delta's oid and run the per-object checks on it. */
+static void hash_resolved_delta(struct object_entry *delta_obj,
+				void *result_data, size_t result_size)
+{
+	hash_object_file(the_hash_algo, result_data, result_size,
+			 delta_obj->real_type, &delta_obj->idx.oid);
+	sha1_object(result_data, NULL, result_size, delta_obj->real_type,
+		    &delta_obj->idx.oid);
+}
+
+/* Wrap a resolved delta's data in a base_data for its own delta children. */
+static struct base_data *attach_resolved_delta(struct object_entry *delta_obj,
+					       struct base_data *base,
+					       void *result_data,
+					       size_t result_size)
+{
+	struct base_data *result = make_base(delta_obj, base);
+	result->data = result_data;
+	result->size = result_size;
+	return result;
+}
+
 static struct base_data *resolve_delta(struct object_entry *delta_obj,
-				       struct base_data *base)
+				       struct base_data *base,
+				       struct object_hash_batch *batch MAYBE_UNUSED)
 {
 	void *delta_data, *result_data;
 	struct base_data *result;
@@ -1067,14 +1132,40 @@ static struct base_data *resolve_delta(struct object_entry *delta_obj,
 	free(delta_data);
 	if (!result_data)
 		bad_object(delta_obj->idx.offset, _("failed to apply delta"));
-	hash_object_file(the_hash_algo, result_data, result_size,
-			 delta_obj->real_type, &delta_obj->idx.oid);
-	sha1_object(result_data, NULL, result_size, delta_obj->real_type,
-		    &delta_obj->idx.oid);
 
-	result = make_base(delta_obj, base);
-	result->data = result_data;
-	result->size = result_size;
+#ifdef SHA1_MB
+	if (batch) {
+		/*
+		 * With no ref-deltas, make_base does not read the oid, so we
+		 * can build it before hashing. Leaves (no delta children) get
+		 * their hash deferred and batched; their data is handed to the
+		 * batch, which frees it after hashing. Batching is only enabled
+		 * for all-ofs-delta packs, so guard that invariant here: make_base
+		 * -> find_ref_delta_children would read the not-yet-computed oid.
+		 * Use BUG() rather than assert() so the guard is not compiled out
+		 * under NDEBUG.
+		 */
+		if (nr_ref_deltas)
+			BUG("batched delta hashing enabled on a pack with ref-deltas");
+		result = attach_resolved_delta(delta_obj, base,
+					       result_data, result_size);
+		if (!result->children_remaining) {
+			if (object_hash_batch_add(the_hash_algo, batch, result_data,
+						  result_size, delta_obj->real_type,
+						  delta_obj, NULL,
+						  index_pack_hash_flush, NULL))
+				BUG("batched hash flush reported an error");
+			result->data = NULL;
+		} else {
+			hash_resolved_delta(delta_obj, result_data, result_size);
+		}
+	} else
+#endif
+	{
+		hash_resolved_delta(delta_obj, result_data, result_size);
+		result = attach_resolved_delta(delta_obj, base,
+					       result_data, result_size);
+	}
 
 	counter_lock();
 	nr_resolved_deltas++;
@@ -1103,6 +1194,12 @@ static int compare_ref_delta_entry(const void *a, const void *b)
 
 static void *threaded_second_pass(void *data)
 {
+#ifdef SHA1_MB
+	struct object_hash_batch batch = { 0 };
+	struct object_hash_batch *batchp = use_sha1_mb ? &batch : NULL;
+#else
+	struct object_hash_batch *batchp = NULL;
+#endif
 	if (data)
 		set_thread_data(data);
 	for (;;) {
@@ -1181,7 +1278,7 @@ static void *threaded_second_pass(void *data)
 
 		if (child_obj) {
 			if (parent) {
-				child = resolve_delta(child_obj, parent);
+				child = resolve_delta(child_obj, parent, batchp);
 				if (!child->children_remaining)
 					FREE_AND_NULL(child->data);
 			} else{
@@ -1238,6 +1335,10 @@ static void *threaded_second_pass(void *data)
 		}
 		work_unlock();
 	}
+#ifdef SHA1_MB
+	if (object_hash_batch_flush(the_hash_algo, &batch, index_pack_hash_flush, NULL))
+		BUG("batched hash flush reported an error");
+#endif
 	return NULL;
 }
 
@@ -1332,6 +1433,15 @@ static void resolve_deltas(struct pack_idx_option *opts)
 
 	if (!nr_ofs_deltas && !nr_ref_deltas)
 		return;
+
+#ifdef SHA1_MB
+	/*
+	 * Batched hashing needs the shared batch hasher to be available and an
+	 * all-ofs-delta pack, so make_base never needs an oid we have not
+	 * computed yet.
+	 */
+	use_sha1_mb = hash_object_batch_available(the_hash_algo) && !nr_ref_deltas;
+#endif
 
 	/* Sort deltas by base SHA1/offset for fast searching */
 	QSORT(ofs_deltas, nr_ofs_deltas, compare_ofs_delta_entry);
