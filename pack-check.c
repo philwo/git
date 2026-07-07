@@ -49,6 +49,124 @@ int check_pack_crc(struct packed_git *p, struct pack_window **w_curs,
 	return data_crc != ntohl(*index_crc);
 }
 
+/*
+ * Hand one verified object to the caller's verify_fn, honoring its "eaten"
+ * out-param: if the callback took ownership of the buffer, clear *data so the
+ * caller does not also free it.
+ */
+static int verify_call_fn(verify_fn fn, void *fn_data,
+			  const struct object_id *oid, enum object_type type,
+			  size_t size, void **data)
+{
+	int eaten = 0;
+	int err = fn(oid, type, size, *data, &eaten, fn_data);
+	if (eaten)
+		*data = NULL;
+	return err;
+}
+
+#ifdef SHA1_MB
+/*
+ * Context for verify_batch_flush(): the pack and verify_fn that verify_packfile()
+ * would otherwise pass straight through to each per-object check.
+ */
+struct verify_batch_cb {
+	struct packed_git *p;
+	verify_fn fn;
+	void *fn_data;
+};
+
+/*
+ * object_hash_batch flush callback. For each queued object, compare its computed
+ * oid against the expected oid stashed in oid[] -- the batched equivalent of
+ * check_object_signature() with a precomputed hash (hash_object_file_batch()
+ * produces the identical oid) -- then run the verify_fn and free the buffer.
+ */
+static int verify_batch_flush(struct object_hash_batch *b,
+			      const struct object_id *computed, void *cb_data)
+{
+	struct verify_batch_cb *cb = cb_data;
+	int err = 0;
+	int i;
+
+	for (i = 0; i < b->n; i++) {
+		void *data = b->data[i];
+
+		if (!oideq(&computed[i], &b->oid[i]))
+			err |= error("packed %s from %s is corrupt",
+				     oid_to_hex(&b->oid[i]), cb->p->pack_name);
+		else if (cb->fn)
+			err |= verify_call_fn(cb->fn, cb->fn_data, &b->oid[i],
+					      b->type[i], b->size[i], &data);
+		free(data);
+	}
+	return err;
+}
+
+/*
+ * A real pack's objects span tens of bytes to hundreds of KB. Hashing 16 at a
+ * time, a batch runs at the speed of its longest lane, so mixing one large
+ * object with small ones wastes lanes -- a naive single window can even run
+ * slower than the scalar hasher. Route each object into a log2 size-class bin
+ * and hash a bin once it holds 16 similar-sized objects, so every SIMD round
+ * has balanced lanes. This reaches ~SHA-NI throughput regardless of the order
+ * objects appear in the pack. VERIFY_HASH_BIN_MAX_BYTES bounds total pinned
+ * in-core data across all bins.
+ */
+#define VERIFY_HASH_NR_BINS 24
+#define VERIFY_HASH_BIN_MAX_BYTES ((size_t)64 * 1024 * 1024)
+
+static int verify_size_bin(size_t size)
+{
+	int b = 0;
+	while (size > 64 && b < VERIFY_HASH_NR_BINS - 1) {
+		size >>= 1;
+		b++;
+	}
+	return b;
+}
+
+static int verify_bins_flush_all(const struct git_hash_algo *algo,
+				 struct object_hash_batch *bins,
+				 object_hash_batch_flush_fn flush_fn, void *cb_data)
+{
+	int err = 0, k;
+
+	for (k = 0; k < VERIFY_HASH_NR_BINS; k++)
+		err |= object_hash_batch_flush(algo, &bins[k], flush_fn, cb_data);
+	return err;
+}
+
+/*
+ * Add one object to its size bin (which self-flushes at 16 objects), then bound
+ * memory: if the bins together hold more than VERIFY_HASH_BIN_MAX_BYTES, flush
+ * the largest one. That only bites when several bins fill with large objects at
+ * once; the common case is a bin reaching 16 and flushing on its own.
+ */
+static int verify_bins_add(const struct git_hash_algo *algo,
+			   struct object_hash_batch *bins,
+			   void *data, size_t size, enum object_type type,
+			   const struct object_id *oid,
+			   object_hash_batch_flush_fn flush_fn, void *cb_data)
+{
+	int err, k, maxk = 0;
+	size_t total = 0, maxb = 0;
+
+	err = object_hash_batch_add(algo, &bins[verify_size_bin(size)], data,
+				    size, type, NULL, oid, flush_fn, cb_data);
+	for (k = 0; k < VERIFY_HASH_NR_BINS; k++) {
+		total += bins[k].buffered_bytes;
+		if (bins[k].buffered_bytes > maxb) {
+			maxb = bins[k].buffered_bytes;
+			maxk = k;
+		}
+	}
+	if (total > VERIFY_HASH_BIN_MAX_BYTES)
+		err |= object_hash_batch_flush(algo, &bins[maxk], flush_fn, cb_data);
+	return err;
+}
+#endif
+
 static int verify_packfile(struct repository *r,
 			   struct packed_git *p,
 			   struct pack_window **w_curs,
@@ -65,6 +183,20 @@ static int verify_packfile(struct repository *r,
 	uint32_t nr_objects, i;
 	int err = 0;
 	struct idx_entry *entries;
+#ifdef SHA1_MB
+	/*
+	 * Hash in-core objects 16-wide, grouped into size-class bins so each
+	 * SIMD round has balanced lanes (see verify_bins_add). This path
+	 * (git fsck) is single-threaded and hash-bound, so it is worth it.
+	 * (git verify-pack does not reach here; it shells out to
+	 * "index-pack --verify".)
+	 */
+	struct object_hash_batch bins[VERIFY_HASH_NR_BINS] = { 0 };
+	struct verify_batch_cb batch_cb = { p, fn, fn_data };
+	int use_batch = hash_object_batch_available(r->hash_algo);
+	for (int k = 0; k < VERIFY_HASH_NR_BINS; k++)
+		bins[k].max_bytes = VERIFY_HASH_BIN_MAX_BYTES;
+#endif
 
 	if (!is_pack_valid(p))
 		return error("packfile %s cannot be accessed", p->pack_name);
@@ -148,6 +280,26 @@ static int verify_packfile(struct repository *r,
 			data_valid = 1;
 		}
 
+#ifdef SHA1_MB
+		if (use_batch && data_valid && data) {
+			/*
+			 * In-core object: defer its oid check so a size bin of
+			 * them can be hashed 16-wide. The bin owns data now and
+			 * frees it after the (sequential) fn callback.
+			 */
+			err |= verify_bins_add(r->hash_algo, bins, data,
+					       size, type, &oid,
+					       verify_batch_flush, &batch_cb);
+			if (((base_count + i) & 1023) == 0)
+				display_progress(progress, base_count + i);
+			continue;
+		}
+		/* non-batchable object: drain all pending bins first */
+		if (use_batch)
+			err |= verify_bins_flush_all(r->hash_algo, bins,
+						     verify_batch_flush, &batch_cb);
+#endif
+
 		if (data_valid && !data)
 			err = error("cannot unpack %s from %s at offset %"PRIuMAX"",
 				    oid_to_hex(&oid), p->pack_name,
@@ -161,12 +313,8 @@ static int verify_packfile(struct repository *r,
 			  stream_object_signature(r, stream, &oid) < 0))
 			err = error("packed %s from %s is corrupt",
 				    oid_to_hex(&oid), p->pack_name);
-		else if (fn) {
-			int eaten = 0;
-			err |= fn(&oid, type, size, data, &eaten, fn_data);
-			if (eaten)
-				data = NULL;
-		}
+		else if (fn)
+			err |= verify_call_fn(fn, fn_data, &oid, type, size, &data);
 		if (((base_count + i) & 1023) == 0)
 			display_progress(progress, base_count + i);
 
@@ -174,6 +322,11 @@ static int verify_packfile(struct repository *r,
 			odb_read_stream_close(stream);
 		free(data);
 	}
+
+#ifdef SHA1_MB
+	err |= verify_bins_flush_all(r->hash_algo, bins,
+				     verify_batch_flush, &batch_cb);
+#endif
 
 	display_progress(progress, base_count + i);
 	free(entries);

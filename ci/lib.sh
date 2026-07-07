@@ -378,7 +378,11 @@ linux-leaks|linux-reftable-leaks)
 linux-asan-ubsan)
 	export SANITIZE=address,undefined
 	export NO_SVN_TESTS=LetsSaveSomeTime
-	MAKEFLAGS="$MAKEFLAGS NO_PYTHON=YepBecauseP4FlakesTooOften"
+	# Build the optional AVX-512 batched SHA-1DC hasher so the batch path
+	# in index-pack/pack-check is compiled on every CI run (it is behind
+	# #ifdef SHA1_MB and would otherwise never build here), and run it
+	# under the sanitizers when the runner has AVX-512.
+	MAKEFLAGS="$MAKEFLAGS NO_PYTHON=YepBecauseP4FlakesTooOften SHA1_MB=YesPlease"
 	;;
 osx-meson)
 	MESONFLAGS="$MESONFLAGS -Dcredential_helpers=osxkeychain"
