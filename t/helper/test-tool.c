@@ -72,6 +72,7 @@ static struct test_cmd cmds[] = {
 	{ "scrap-cache-tree", cmd__scrap_cache_tree },
 	{ "serve-v2", cmd__serve_v2 },
 	{ "sha1", cmd__sha1 },
+	{ "sha1-mb", cmd__sha1_mb },
 	{ "sha1-is-sha1dc", cmd__sha1_is_sha1dc },
 	{ "sha1-unsafe", cmd__sha1_unsafe },
 	{ "sha256", cmd__sha256 },

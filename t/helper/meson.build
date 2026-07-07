@@ -61,6 +61,7 @@ test_tool_sources = [
   'test-scrap-cache-tree.c',
   'test-serve-v2.c',
   'test-sha1.c',
+  'test-sha1-mb.c',
   'test-sha256.c',
   'test-sigchain.c',
   'test-simple-ipc.c',
