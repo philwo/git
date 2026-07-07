@@ -860,6 +860,7 @@ TEST_BUILTINS_OBJS += test-run-command.o
 TEST_BUILTINS_OBJS += test-scrap-cache-tree.o
 TEST_BUILTINS_OBJS += test-serve-v2.o
 TEST_BUILTINS_OBJS += test-sha1.o
+TEST_BUILTINS_OBJS += test-sha1-mb.o
 TEST_BUILTINS_OBJS += test-sha256.o
 TEST_BUILTINS_OBJS += test-sigchain.o
 TEST_BUILTINS_OBJS += test-simple-ipc.o
@@ -2133,6 +2134,7 @@ ifdef APPLE_COMMON_CRYPTO_SHA1
 else
 	BASIC_CFLAGS += -DSHA1_DC
 	LIB_OBJS += sha1dc_git.o
+	SHA1_BACKEND_DC = YesPlease
 ifdef DC_SHA1_EXTERNAL
         ifdef DC_SHA1_SUBMODULE
                 ifneq ($(DC_SHA1_SUBMODULE),auto)
@@ -2155,8 +2157,42 @@ endif
 		-DSHA1DC_INIT_SAFE_HASH_DEFAULT=0 \
 		-DSHA1DC_CUSTOM_INCLUDE_SHA1_C="\"git-compat-util.h\"" \
 		-DSHA1DC_CUSTOM_INCLUDE_UBC_CHECK_C="\"git-compat-util.h\""
+# Optional AVX-512 batched multi-object SHA-1DC hasher (x86-64/i386 only).
+# Build with "make SHA1_MB=YesPlease"; guarded at runtime by CPU detection.
+# The engine uses AVX-512 intrinsics, so only compile it and add the AVX-512
+# flags on x86. On other arches just warn and ignore SHA1_MB; the source still
+# compiles there (it degrades to a stub), we simply do not build it in.
+ifdef SHA1_MB
+ifneq (,$(filter $(uname_M),x86_64 amd64 i386 i486 i586 i686))
+	LIB_OBJS += sha1dc/sha1_mb.o
+	LIB_OBJS += sha1dc/sha1_mb_ubc.o
+	BASIC_CFLAGS += -DSHA1_MB
+	SHA1_MB_FLAGS = -mavx512f -mavx512bw -mavx512vl -mavx512dq
+	# Compiling with -mavx512* makes GNU as emit a .note.gnu.property
+	# "x86 ISA used" note. That note is informational (the linker does not
+	# turn it into an enforced "ISA needed" requirement), so it does not
+	# defeat the runtime sha1_mb_available() dispatch, but drop it anyway to
+	# keep the note clean. Only add the flag when the assembler accepts it;
+	# clang's integrated assembler rejects it.
+	SHA1_MB_USED_NOTE_FLAG := $(shell $(CC) -Wa,-mx86-used-note=no -x c -c /dev/null -o /dev/null >/dev/null 2>&1 && echo -Wa,-mx86-used-note=no)
+	SHA1_MB_FLAGS += $(SHA1_MB_USED_NOTE_FLAG)
+sha1dc/sha1_mb.sp sha1dc/sha1_mb.s sha1dc/sha1_mb.o: EXTRA_CPPFLAGS += $(SHA1_MB_FLAGS)
+sha1dc/sha1_mb_ubc.sp sha1dc/sha1_mb_ubc.s sha1dc/sha1_mb_ubc.o: EXTRA_CPPFLAGS += $(SHA1_MB_FLAGS)
+else
+$(warning SHA1_MB is x86-only (needs AVX-512); ignoring it on $(uname_M).)
 endif
 endif
+endif
+endif
+endif
+endif
+
+# The batched hasher lives in sha1dc/ and needs the sha1dc backend. Warn (like
+# meson errors) if SHA1_MB was requested alongside a different SHA-1 backend, so
+# the request is not dropped silently.
+ifdef SHA1_MB
+ifndef SHA1_BACKEND_DC
+$(warning SHA1_MB requires the sha1dc SHA-1 backend; ignoring it.)
 endif
 endif
 

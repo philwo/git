@@ -1,0 +1,190 @@
+/* AUTO-GENERATED 16-wide SHA-1 recompression from sha1dc SHA1_RECOMPRESS. */
+#pragma once
+#include <immintrin.h>
+#include <stdint.h>
+#define A5(x) _mm512_rol_epi32((x),5)
+#define R30(x) _mm512_rol_epi32((x),30)
+#define RR30(x) _mm512_ror_epi32((x),30)
+#define ADD(x,y) _mm512_add_epi32((x),(y))
+#define SUB(x,y) _mm512_sub_epi32((x),(y))
+#define F1(b,c,d) _mm512_ternarylogic_epi32((b),(c),(d),0xCA)
+#define F2(b,c,d) _mm512_ternarylogic_epi32((b),(c),(d),0x96)
+#define F3(b,c,d) _mm512_ternarylogic_epi32((b),(c),(d),0xE8)
+#define F4(b,c,d) _mm512_ternarylogic_epi32((b),(c),(d),0x96)
+
+static inline __mmask16 recompress_x16_58(const __m512i me2[80], const __m512i st[5], const __m512i post[5]){
+	__m512i va=st[0],vb=st[1],vc=st[2],vd=st[3],ve=st[4];
+	__m512i ia,ib,ic,id,ie,oa,ob,oc,od,oe;
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F3(ve,va,vb)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[57])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F3(va,vb,vc)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[56])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F3(vb,vc,vd)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[55])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F3(vc,vd,ve)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[54])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F3(vd,ve,va)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[53])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F3(ve,va,vb)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[52])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F3(va,vb,vc)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[51])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F3(vb,vc,vd)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[50])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F3(vc,vd,ve)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[49])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F3(vd,ve,va)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[48])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F3(ve,va,vb)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[47])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F3(va,vb,vc)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[46])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F3(vb,vc,vd)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[45])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F3(vc,vd,ve)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[44])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F3(vd,ve,va)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[43])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F3(ve,va,vb)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[42])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F3(va,vb,vc)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[41])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F3(vb,vc,vd)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[40])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F2(vc,vd,ve)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[39])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F2(vd,ve,va)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[38])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F2(ve,va,vb)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[37])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F2(va,vb,vc)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[36])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F2(vb,vc,vd)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[35])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F2(vc,vd,ve)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[34])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F2(vd,ve,va)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[33])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F2(ve,va,vb)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[32])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F2(va,vb,vc)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[31])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F2(vb,vc,vd)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[30])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F2(vc,vd,ve)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[29])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F2(vd,ve,va)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[28])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F2(ve,va,vb)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[27])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F2(va,vb,vc)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[26])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F2(vb,vc,vd)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[25])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F2(vc,vd,ve)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[24])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F2(vd,ve,va)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[23])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F2(ve,va,vb)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[22])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F2(va,vb,vc)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[21])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F2(vb,vc,vd)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[20])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F1(vc,vd,ve)), ADD(_mm512_set1_epi32(0x5A827999), me2[19])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F1(vd,ve,va)), ADD(_mm512_set1_epi32(0x5A827999), me2[18])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F1(ve,va,vb)), ADD(_mm512_set1_epi32(0x5A827999), me2[17])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F1(va,vb,vc)), ADD(_mm512_set1_epi32(0x5A827999), me2[16])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F1(vb,vc,vd)), ADD(_mm512_set1_epi32(0x5A827999), me2[15])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F1(vc,vd,ve)), ADD(_mm512_set1_epi32(0x5A827999), me2[14])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F1(vd,ve,va)), ADD(_mm512_set1_epi32(0x5A827999), me2[13])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F1(ve,va,vb)), ADD(_mm512_set1_epi32(0x5A827999), me2[12])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F1(va,vb,vc)), ADD(_mm512_set1_epi32(0x5A827999), me2[11])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F1(vb,vc,vd)), ADD(_mm512_set1_epi32(0x5A827999), me2[10])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F1(vc,vd,ve)), ADD(_mm512_set1_epi32(0x5A827999), me2[9])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F1(vd,ve,va)), ADD(_mm512_set1_epi32(0x5A827999), me2[8])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F1(ve,va,vb)), ADD(_mm512_set1_epi32(0x5A827999), me2[7])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F1(va,vb,vc)), ADD(_mm512_set1_epi32(0x5A827999), me2[6])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F1(vb,vc,vd)), ADD(_mm512_set1_epi32(0x5A827999), me2[5])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F1(vc,vd,ve)), ADD(_mm512_set1_epi32(0x5A827999), me2[4])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F1(vd,ve,va)), ADD(_mm512_set1_epi32(0x5A827999), me2[3])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F1(ve,va,vb)), ADD(_mm512_set1_epi32(0x5A827999), me2[2])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F1(va,vb,vc)), ADD(_mm512_set1_epi32(0x5A827999), me2[1])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F1(vb,vc,vd)), ADD(_mm512_set1_epi32(0x5A827999), me2[0])));
+	ia=va;ib=vb;ic=vc;id=vd;ie=ve;
+	va=st[0];vb=st[1];vc=st[2];vd=st[3];ve=st[4];
+	vb=ADD(vb, ADD(ADD(A5(vc), F3(vd,ve,va)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[58]))); vd=R30(vd);
+	va=ADD(va, ADD(ADD(A5(vb), F3(vc,vd,ve)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[59]))); vc=R30(vc);
+	ve=ADD(ve, ADD(ADD(A5(va), F4(vb,vc,vd)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[60]))); vb=R30(vb);
+	vd=ADD(vd, ADD(ADD(A5(ve), F4(va,vb,vc)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[61]))); va=R30(va);
+	vc=ADD(vc, ADD(ADD(A5(vd), F4(ve,va,vb)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[62]))); ve=R30(ve);
+	vb=ADD(vb, ADD(ADD(A5(vc), F4(vd,ve,va)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[63]))); vd=R30(vd);
+	va=ADD(va, ADD(ADD(A5(vb), F4(vc,vd,ve)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[64]))); vc=R30(vc);
+	ve=ADD(ve, ADD(ADD(A5(va), F4(vb,vc,vd)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[65]))); vb=R30(vb);
+	vd=ADD(vd, ADD(ADD(A5(ve), F4(va,vb,vc)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[66]))); va=R30(va);
+	vc=ADD(vc, ADD(ADD(A5(vd), F4(ve,va,vb)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[67]))); ve=R30(ve);
+	vb=ADD(vb, ADD(ADD(A5(vc), F4(vd,ve,va)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[68]))); vd=R30(vd);
+	va=ADD(va, ADD(ADD(A5(vb), F4(vc,vd,ve)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[69]))); vc=R30(vc);
+	ve=ADD(ve, ADD(ADD(A5(va), F4(vb,vc,vd)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[70]))); vb=R30(vb);
+	vd=ADD(vd, ADD(ADD(A5(ve), F4(va,vb,vc)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[71]))); va=R30(va);
+	vc=ADD(vc, ADD(ADD(A5(vd), F4(ve,va,vb)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[72]))); ve=R30(ve);
+	vb=ADD(vb, ADD(ADD(A5(vc), F4(vd,ve,va)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[73]))); vd=R30(vd);
+	va=ADD(va, ADD(ADD(A5(vb), F4(vc,vd,ve)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[74]))); vc=R30(vc);
+	ve=ADD(ve, ADD(ADD(A5(va), F4(vb,vc,vd)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[75]))); vb=R30(vb);
+	vd=ADD(vd, ADD(ADD(A5(ve), F4(va,vb,vc)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[76]))); va=R30(va);
+	vc=ADD(vc, ADD(ADD(A5(vd), F4(ve,va,vb)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[77]))); ve=R30(ve);
+	vb=ADD(vb, ADD(ADD(A5(vc), F4(vd,ve,va)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[78]))); vd=R30(vd);
+	va=ADD(va, ADD(ADD(A5(vb), F4(vc,vd,ve)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[79]))); vc=R30(vc);
+	oa=ADD(ia,va);ob=ADD(ib,vb);oc=ADD(ic,vc);od=ADD(id,vd);oe=ADD(ie,ve);
+	return _mm512_cmpeq_epi32_mask(oa,post[0]) & _mm512_cmpeq_epi32_mask(ob,post[1]) & _mm512_cmpeq_epi32_mask(oc,post[2]) & _mm512_cmpeq_epi32_mask(od,post[3]) & _mm512_cmpeq_epi32_mask(oe,post[4]);
+}
+static inline __mmask16 recompress_x16_65(const __m512i me2[80], const __m512i st[5], const __m512i post[5]){
+	__m512i va=st[0],vb=st[1],vc=st[2],vd=st[3],ve=st[4];
+	__m512i ia,ib,ic,id,ie,oa,ob,oc,od,oe;
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F4(vc,vd,ve)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[64])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F4(vd,ve,va)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[63])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F4(ve,va,vb)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[62])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F4(va,vb,vc)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[61])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F4(vb,vc,vd)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[60])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F3(vc,vd,ve)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[59])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F3(vd,ve,va)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[58])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F3(ve,va,vb)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[57])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F3(va,vb,vc)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[56])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F3(vb,vc,vd)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[55])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F3(vc,vd,ve)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[54])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F3(vd,ve,va)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[53])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F3(ve,va,vb)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[52])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F3(va,vb,vc)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[51])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F3(vb,vc,vd)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[50])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F3(vc,vd,ve)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[49])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F3(vd,ve,va)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[48])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F3(ve,va,vb)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[47])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F3(va,vb,vc)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[46])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F3(vb,vc,vd)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[45])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F3(vc,vd,ve)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[44])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F3(vd,ve,va)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[43])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F3(ve,va,vb)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[42])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F3(va,vb,vc)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[41])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F3(vb,vc,vd)), ADD(_mm512_set1_epi32(0x8F1BBCDC), me2[40])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F2(vc,vd,ve)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[39])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F2(vd,ve,va)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[38])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F2(ve,va,vb)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[37])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F2(va,vb,vc)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[36])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F2(vb,vc,vd)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[35])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F2(vc,vd,ve)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[34])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F2(vd,ve,va)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[33])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F2(ve,va,vb)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[32])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F2(va,vb,vc)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[31])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F2(vb,vc,vd)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[30])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F2(vc,vd,ve)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[29])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F2(vd,ve,va)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[28])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F2(ve,va,vb)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[27])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F2(va,vb,vc)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[26])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F2(vb,vc,vd)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[25])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F2(vc,vd,ve)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[24])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F2(vd,ve,va)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[23])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F2(ve,va,vb)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[22])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F2(va,vb,vc)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[21])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F2(vb,vc,vd)), ADD(_mm512_set1_epi32(0x6ED9EBA1), me2[20])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F1(vc,vd,ve)), ADD(_mm512_set1_epi32(0x5A827999), me2[19])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F1(vd,ve,va)), ADD(_mm512_set1_epi32(0x5A827999), me2[18])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F1(ve,va,vb)), ADD(_mm512_set1_epi32(0x5A827999), me2[17])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F1(va,vb,vc)), ADD(_mm512_set1_epi32(0x5A827999), me2[16])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F1(vb,vc,vd)), ADD(_mm512_set1_epi32(0x5A827999), me2[15])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F1(vc,vd,ve)), ADD(_mm512_set1_epi32(0x5A827999), me2[14])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F1(vd,ve,va)), ADD(_mm512_set1_epi32(0x5A827999), me2[13])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F1(ve,va,vb)), ADD(_mm512_set1_epi32(0x5A827999), me2[12])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F1(va,vb,vc)), ADD(_mm512_set1_epi32(0x5A827999), me2[11])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F1(vb,vc,vd)), ADD(_mm512_set1_epi32(0x5A827999), me2[10])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F1(vc,vd,ve)), ADD(_mm512_set1_epi32(0x5A827999), me2[9])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F1(vd,ve,va)), ADD(_mm512_set1_epi32(0x5A827999), me2[8])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F1(ve,va,vb)), ADD(_mm512_set1_epi32(0x5A827999), me2[7])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F1(va,vb,vc)), ADD(_mm512_set1_epi32(0x5A827999), me2[6])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F1(vb,vc,vd)), ADD(_mm512_set1_epi32(0x5A827999), me2[5])));
+	vc=RR30(vc); va=SUB(va, ADD(ADD(A5(vb), F1(vc,vd,ve)), ADD(_mm512_set1_epi32(0x5A827999), me2[4])));
+	vd=RR30(vd); vb=SUB(vb, ADD(ADD(A5(vc), F1(vd,ve,va)), ADD(_mm512_set1_epi32(0x5A827999), me2[3])));
+	ve=RR30(ve); vc=SUB(vc, ADD(ADD(A5(vd), F1(ve,va,vb)), ADD(_mm512_set1_epi32(0x5A827999), me2[2])));
+	va=RR30(va); vd=SUB(vd, ADD(ADD(A5(ve), F1(va,vb,vc)), ADD(_mm512_set1_epi32(0x5A827999), me2[1])));
+	vb=RR30(vb); ve=SUB(ve, ADD(ADD(A5(va), F1(vb,vc,vd)), ADD(_mm512_set1_epi32(0x5A827999), me2[0])));
+	ia=va;ib=vb;ic=vc;id=vd;ie=ve;
+	va=st[0];vb=st[1];vc=st[2];vd=st[3];ve=st[4];
+	ve=ADD(ve, ADD(ADD(A5(va), F4(vb,vc,vd)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[65]))); vb=R30(vb);
+	vd=ADD(vd, ADD(ADD(A5(ve), F4(va,vb,vc)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[66]))); va=R30(va);
+	vc=ADD(vc, ADD(ADD(A5(vd), F4(ve,va,vb)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[67]))); ve=R30(ve);
+	vb=ADD(vb, ADD(ADD(A5(vc), F4(vd,ve,va)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[68]))); vd=R30(vd);
+	va=ADD(va, ADD(ADD(A5(vb), F4(vc,vd,ve)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[69]))); vc=R30(vc);
+	ve=ADD(ve, ADD(ADD(A5(va), F4(vb,vc,vd)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[70]))); vb=R30(vb);
+	vd=ADD(vd, ADD(ADD(A5(ve), F4(va,vb,vc)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[71]))); va=R30(va);
+	vc=ADD(vc, ADD(ADD(A5(vd), F4(ve,va,vb)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[72]))); ve=R30(ve);
+	vb=ADD(vb, ADD(ADD(A5(vc), F4(vd,ve,va)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[73]))); vd=R30(vd);
+	va=ADD(va, ADD(ADD(A5(vb), F4(vc,vd,ve)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[74]))); vc=R30(vc);
+	ve=ADD(ve, ADD(ADD(A5(va), F4(vb,vc,vd)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[75]))); vb=R30(vb);
+	vd=ADD(vd, ADD(ADD(A5(ve), F4(va,vb,vc)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[76]))); va=R30(va);
+	vc=ADD(vc, ADD(ADD(A5(vd), F4(ve,va,vb)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[77]))); ve=R30(ve);
+	vb=ADD(vb, ADD(ADD(A5(vc), F4(vd,ve,va)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[78]))); vd=R30(vd);
+	va=ADD(va, ADD(ADD(A5(vb), F4(vc,vd,ve)), ADD(_mm512_set1_epi32(0xCA62C1D6), me2[79]))); vc=R30(vc);
+	oa=ADD(ia,va);ob=ADD(ib,vb);oc=ADD(ic,vc);od=ADD(id,vd);oe=ADD(ie,ve);
+	return _mm512_cmpeq_epi32_mask(oa,post[0]) & _mm512_cmpeq_epi32_mask(ob,post[1]) & _mm512_cmpeq_epi32_mask(oc,post[2]) & _mm512_cmpeq_epi32_mask(od,post[3]) & _mm512_cmpeq_epi32_mask(oe,post[4]);
+}

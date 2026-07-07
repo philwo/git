@@ -1599,6 +1599,32 @@ if sha1_backend == 'sha1dc'
     'sha1dc/ubc_check.c',
   ]
 endif
+
+# Optional AVX-512 batched multi-object SHA-1DC hasher. The two source files use
+# AVX-512 intrinsics, so they are compiled with -mavx512* into their own static
+# library (see 'sha1_mb' below); the rest of libgit only needs -DSHA1_MB. The
+# engine is guarded at runtime by sha1_mb_available(), so a binary built here
+# still runs on CPUs without AVX-512.
+sha1_mb_enabled = false
+sha1_mb_flags = []
+if get_option('sha1_mb')
+  if sha1_backend != 'sha1dc'
+    error('sha1_mb requires the sha1dc sha1_backend.')
+  elif not (host_machine.cpu_family() in ['x86', 'x86_64'])
+    warning('sha1_mb is x86-only (needs AVX-512); ignoring it on @0@.'.format(host_machine.cpu_family()))
+  else
+    sha1_mb_avx = ['-mavx512f', '-mavx512bw', '-mavx512vl', '-mavx512dq']
+    if not compiler.has_multi_arguments(sha1_mb_avx)
+      warning('sha1_mb requested but the compiler does not support AVX-512; ignoring it.')
+    else
+      sha1_mb_enabled = true
+      # -Wa,-mx86-used-note=no drops the informational ISA-used note (GNU as
+      # only); harmless if unsupported, so filter it through the compiler.
+      sha1_mb_flags = sha1_mb_avx + compiler.get_supported_arguments('-Wa,-mx86-used-note=no')
+      libgit_c_args += '-DSHA1_MB'
+    endif
+  endif
+endif
 if sha1_backend == 'CommonCrypto' or sha1_unsafe_backend == 'CommonCrypto'
   if sha1_backend == 'CommonCrypto'
     libgit_c_args += '-DSHA1_APPLE'
@@ -1773,24 +1799,40 @@ else
   ]
 endif
 
+libgit_link_with = [
+  static_library('compat',
+    sources: compat_sources,
+    c_args: libgit_c_args,
+    dependencies: libgit_dependencies,
+    include_directories: libgit_include_directories,
+  ),
+  static_library('git',
+    sources: libgit_sources,
+    c_args: libgit_c_args + [
+      '-DGIT_VERSION_H="' + version_def_h.full_path() + '"',
+    ],
+    c_pch: 'tools/precompiled.h',
+    dependencies: libgit_dependencies,
+    include_directories: libgit_include_directories,
+  ),
+]
+
+# The AVX-512 batched SHA-1DC hasher is built separately so only these two
+# files get -mavx512*; the rest of libgit stays buildable for a generic CPU.
+if sha1_mb_enabled
+  libgit_link_with += static_library('sha1_mb',
+    sources: [
+      'sha1dc/sha1_mb.c',
+      'sha1dc/sha1_mb_ubc.c',
+    ],
+    c_args: libgit_c_args + sha1_mb_flags,
+    dependencies: libgit_dependencies,
+    include_directories: libgit_include_directories,
+  )
+endif
+
 libgit = declare_dependency(
-  link_with: [
-    static_library('compat',
-      sources: compat_sources,
-      c_args: libgit_c_args,
-      dependencies: libgit_dependencies,
-      include_directories: libgit_include_directories,
-    ),
-    static_library('git',
-      sources: libgit_sources,
-      c_args: libgit_c_args + [
-        '-DGIT_VERSION_H="' + version_def_h.full_path() + '"',
-      ],
-      c_pch: 'tools/precompiled.h',
-      dependencies: libgit_dependencies,
-      include_directories: libgit_include_directories,
-    ),
-  ],
+  link_with: libgit_link_with,
   compile_args: libgit_c_args,
   dependencies: libgit_dependencies,
   include_directories: libgit_include_directories,

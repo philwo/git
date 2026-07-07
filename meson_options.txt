@@ -69,6 +69,8 @@ option('sha1_backend', type: 'combo', choices: ['openssl', 'block', 'sha1dc', 'C
   description: 'The backend used for hashing objects with the SHA1 object format.')
 option('sha1_unsafe_backend', type: 'combo', choices: ['openssl', 'block', 'CommonCrypto', 'none'], value: 'none',
   description: 'The backend used for hashing data with the SHA1 object format in case no cryptographic security is needed.')
+option('sha1_mb', type: 'boolean', value: false,
+  description: 'Build the optional AVX-512 batched multi-object SHA-1DC hasher (x86-64 only; guarded at runtime by CPU detection). Requires the sha1dc backend.')
 option('sha256_backend', type: 'combo', choices: ['openssl', 'nettle', 'gcrypt', 'block'], value: 'block',
   description: 'The backend used for hashing objects with the SHA256 object format.')
 option('zlib_backend', type: 'combo', choices: ['auto', 'zlib', 'zlib-ng'], value: 'auto',
