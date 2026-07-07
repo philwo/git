@@ -10,6 +10,9 @@
 #define USE_THE_REPOSITORY_VARIABLE
 
 #include "git-compat-util.h"
+#ifdef SHA1_MB
+#include "sha1dc/sha1_mb.h"
+#endif
 #include "convert.h"
 #include "dir.h"
 #include "environment.h"
@@ -24,6 +27,7 @@
 #include "odb/transaction.h"
 #include "pack.h"
 #include "packfile.h"
+#include "parse.h"
 #include "path.h"
 #include "read-cache-ll.h"
 #include "setup.h"
@@ -480,6 +484,120 @@ void hash_object_file(const struct git_hash_algo *algo, const void *buf,
 
 	write_object_file_prepare(algo, buf, len, type, oid, hdr, &hdrlen);
 }
+
+#ifdef SHA1_MB
+int hash_object_batch_available(const struct git_hash_algo *algo)
+{
+	return sha1_mb_available() &&
+	       algo == &hash_algos[GIT_HASH_SHA1] &&
+	       !git_env_bool("GIT_TEST_NO_SHA1_MB", 0);
+}
+
+void hash_object_file_batch(const struct git_hash_algo *algo,
+			    const void **bufs, const size_t *sizes,
+			    const enum object_type *types, size_t n,
+			    struct object_id *out)
+{
+	struct sha1_mb_job jobs[OBJECT_HASH_BATCH_SZ] = { 0 };
+	unsigned char digest[OBJECT_HASH_BATCH_SZ][GIT_SHA1_RAWSZ];
+	unsigned char collided[OBJECT_HASH_BATCH_SZ];
+	char hdrs[OBJECT_HASH_BATCH_SZ][MAX_HEADER_LEN];
+
+	if (!n)
+		return;
+	/*
+	 * The batched engine is SHA-1DC only (hash_object_batch_available()
+	 * gates on it) and the scratch above is sized for a single window, so
+	 * hard-fail rather than read past the SHA-1 digest / overrun the stack
+	 * if a future caller forgets those preconditions.
+	 */
+	if (algo != &hash_algos[GIT_HASH_SHA1])
+		BUG("hash_object_file_batch() only supports SHA-1");
+	if (n > OBJECT_HASH_BATCH_SZ)
+		BUG("hash_object_file_batch() given %"PRIuMAX" jobs, max %d",
+		    (uintmax_t)n, OBJECT_HASH_BATCH_SZ);
+
+	/*
+	 * Issue a single sha1_mb_hash() over all n jobs so the kernel can keep
+	 * its AVX-512 lanes fed and refill them as jobs finish, instead of
+	 * re-chunking into fixed groups. The number of objects a caller queues
+	 * before calling here (the batch window size) is a separate tuning knob
+	 * owned by the callers, not by this function.
+	 */
+	for (size_t i = 0; i < n; i++) {
+		/*
+		 * oid hashes "<type> <size>\0" followed by the body; the
+		 * header is bounded by MAX_HEADER_LEN.
+		 */
+		jobs[i].prefix = (const unsigned char *)hdrs[i];
+		jobs[i].prefixlen = format_object_header(hdrs[i], sizeof(hdrs[i]),
+							 types[i], sizes[i]);
+		jobs[i].data = bufs[i];
+		jobs[i].len = sizes[i];
+	}
+	sha1_mb_hash(jobs, n, digest, collided);
+	for (size_t i = 0; i < n; i++) {
+		if (collided[i]) {
+			/* let the normal path fire git's collision handling */
+			hash_object_file(algo, bufs[i], sizes[i],
+					 types[i], &out[i]);
+		} else {
+			oidread(&out[i], digest[i], algo);
+		}
+	}
+}
+
+#define OBJECT_HASH_BATCH_MAX_BYTES (8 * 1024 * 1024)
+
+int object_hash_batch_flush(const struct git_hash_algo *algo,
+			    struct object_hash_batch *b,
+			    object_hash_batch_flush_fn flush_fn, void *cb_data)
+{
+	struct object_id computed[OBJECT_HASH_BATCH_SZ];
+	int err;
+
+	if (!b->n)
+		return 0;
+	hash_object_file_batch(algo, (const void **)b->data, b->size,
+			       b->type, b->n, computed);
+	err = flush_fn(b, computed, cb_data);
+	b->n = 0;
+	b->buffered_bytes = 0;
+	return err;
+}
+
+int object_hash_batch_add(const struct git_hash_algo *algo,
+			  struct object_hash_batch *b,
+			  void *data, size_t size, enum object_type type,
+			  void *cookie, const struct object_id *oid,
+			  object_hash_batch_flush_fn flush_fn, void *cb_data)
+{
+	int err = 0;
+	size_t max_bytes = b->max_bytes ? b->max_bytes : OBJECT_HASH_BATCH_MAX_BYTES;
+
+	if (b->n && b->buffered_bytes + size > max_bytes)
+		err = object_hash_batch_flush(algo, b, flush_fn, cb_data);
+	b->data[b->n] = data;
+	b->size[b->n] = size;
+	b->type[b->n] = type;
+	b->cookie[b->n] = cookie;
+	if (oid)
+		oidcpy(&b->oid[b->n], oid);
+	b->n++;
+	b->buffered_bytes += size;
+	/*
+	 * Flush a full window, and also flush immediately when this object by
+	 * itself put us at or over the byte cap (the pre-add check above cannot
+	 * fire for the first object in an empty window). Otherwise a single
+	 * oversized buffer would stay owned by the batch until the next add or
+	 * the final flush, defeating the cap.
+	 */
+	if (b->n == OBJECT_HASH_BATCH_SZ ||
+	    b->buffered_bytes >= max_bytes)
+		err |= object_hash_batch_flush(algo, b, flush_fn, cb_data);
+	return err;
+}
+#endif
 
 struct transaction_packfile {
 	char *pack_tmp_name;

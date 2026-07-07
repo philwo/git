@@ -133,6 +133,89 @@ int finalize_object_file_flags(struct repository *repo,
 void hash_object_file(const struct git_hash_algo *algo, const void *buf,
 		      unsigned long len, enum object_type type,
 		      struct object_id *oid);
+
+#ifdef SHA1_MB
+/*
+ * 1 if the batched AVX-512 SHA-1DC hasher can be used for algo: it must be
+ * available on this CPU, algo must be SHA-1, and GIT_TEST_NO_SHA1_MB must be
+ * unset. Hashing-bound callers (index-pack, fsck) use it to hash many objects
+ * at once.
+ */
+int hash_object_batch_available(const struct git_hash_algo *algo);
+
+/*
+ * Compute the oids of n objects at once. bufs[i]/sizes[i]/types[i] describe the
+ * in-core object payloads; out[i] receives the oid. Buffers are not copied and
+ * stay owned by the caller. On a detected collision for object i, this falls
+ * back to hash_object_file(), which fires git's normal collision handling.
+ * Only call when hash_object_batch_available(algo) is true.
+ */
+void hash_object_file_batch(const struct git_hash_algo *algo,
+			    const void **bufs, const size_t *sizes,
+			    const enum object_type *types, size_t n,
+			    struct object_id *out);
+
+/*
+ * A sliding window of in-core objects whose hashing is deferred so it can run
+ * many-at-once through hash_object_file_batch(). Callers (index-pack, fsck)
+ * queue objects with object_hash_batch_add(); the window is flushed when it
+ * fills (max_n objects or max_bytes of payload) or on demand with
+ * object_hash_batch_flush(). Each slot owns its data[] until flushed. The two
+ * scalar-per-slot fields, cookie[] and oid[], are for the caller to use as it
+ * needs: index-pack stashes the object_entry in cookie[]; fsck stashes the
+ * expected oid in oid[].
+ *
+ * One batch holds up to OBJECT_HASH_BATCH_SZ objects and is hashed in a single
+ * sha1_mb_hash() call, i.e. one 16-wide SIMD round. That round runs until its
+ * longest lane finishes, so a batch that mixes one large object with small ones
+ * wastes the other lanes -- on a size-skewed pack a naive single window can run
+ * SLOWER than the scalar hasher. A caller that sees a wide object-size spread
+ * should therefore group objects into size classes and fill a separate batch
+ * per class, so every round hashes similar-sized objects (fsck does this; see
+ * pack-check.c). That reaches SHA-NI throughput independent of object ordering.
+ *
+ * max_bytes is a per-caller payload cap (0 = the default below); a caller that
+ * keeps many batches alive at once (fsck's size bins) sets it to bound memory.
+ */
+#define OBJECT_HASH_BATCH_SZ 16
+struct object_hash_batch {
+	int n;
+	size_t max_bytes;		/* flush at this many payload bytes (0 = default) */
+	size_t buffered_bytes;
+	void *data[OBJECT_HASH_BATCH_SZ];
+	size_t size[OBJECT_HASH_BATCH_SZ];
+	enum object_type type[OBJECT_HASH_BATCH_SZ];
+	void *cookie[OBJECT_HASH_BATCH_SZ];
+	struct object_id oid[OBJECT_HASH_BATCH_SZ];
+};
+
+/*
+ * Called once per flush after the window's objects have been hashed; computed[i]
+ * is the oid of queued object i. The callback consumes each slot (data[i]/size[i]/
+ * type[i]/cookie[i]/oid[i]) and MUST free b->data[i]. Its return value is passed
+ * back out through object_hash_batch_add()/object_hash_batch_flush() (fsck ORs
+ * error bits into it; index-pack returns 0).
+ */
+typedef int (*object_hash_batch_flush_fn)(struct object_hash_batch *b,
+					  const struct object_id *computed,
+					  void *cb_data);
+
+/*
+ * Queue one in-core object (data/size/type, plus the caller's cookie and/or
+ * expected oid) for batched hashing, flushing through flush_fn when the window
+ * fills. Returns any error flush_fn reported (0 if it did not flush).
+ */
+int object_hash_batch_add(const struct git_hash_algo *algo,
+			  struct object_hash_batch *b,
+			  void *data, size_t size, enum object_type type,
+			  void *cookie, const struct object_id *oid,
+			  object_hash_batch_flush_fn flush_fn, void *cb_data);
+
+/* Flush any objects still queued in the window through flush_fn. */
+int object_hash_batch_flush(const struct git_hash_algo *algo,
+			    struct object_hash_batch *b,
+			    object_hash_batch_flush_fn flush_fn, void *cb_data);
+#endif
 void write_object_file_prepare(const struct git_hash_algo *algo,
 			       const void *buf, unsigned long len,
 			       enum object_type type, struct object_id *oid,
