@@ -1603,6 +1603,12 @@ if sha1_backend == 'sha1dc'
     'sha1dc/ubc_check.c',
   ]
 endif
+if sha1_unsafe_backend == 'sha1dc'
+  if sha1_backend != 'sha1dc'
+    error('sha1_unsafe_backend=sha1dc requires sha1_backend=sha1dc')
+  endif
+  libgit_c_args += '-DSHA1_DC_UNSAFE'
+endif
 if sha1_backend == 'CommonCrypto' or sha1_unsafe_backend == 'CommonCrypto'
   if sha1_backend == 'CommonCrypto'
     libgit_c_args += '-DSHA1_APPLE'
