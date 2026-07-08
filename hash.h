@@ -19,7 +19,21 @@
 #include "block-sha1/sha1.h"
 #endif
 
-#if defined(SHA1_APPLE_UNSAFE)
+#if defined(SHA1_DC_UNSAFE)
+#  ifndef SHA1_DC
+#    error SHA1_DC_UNSAFE requires the collision-detecting SHA1_DC backend
+#  endif
+/*
+ * The same sha1collisiondetection code, but with collision detection
+ * disabled at init time; where it has a hardware fast path, this runs
+ * at plain hardware SHA-1 speed.
+ */
+#  define SHA1_UNSAFE_BACKEND "SHA1_DC_UNSAFE"
+#  define platform_SHA_CTX_unsafe SHA1_CTX
+#  define platform_SHA1_Init_unsafe git_SHA1DCInit_unsafe
+#  define platform_SHA1_Update_unsafe git_SHA1DCUpdate
+#  define platform_SHA1_Final_unsafe git_SHA1DCFinal
+#elif defined(SHA1_APPLE_UNSAFE)
 #  define SHA1_UNSAFE_BACKEND "SHA1_APPLE_UNSAFE"
 #  include <CommonCrypto/CommonDigest.h>
 #  define platform_SHA_CTX_unsafe CC_SHA1_CTX
