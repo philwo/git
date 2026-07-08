@@ -1591,11 +1591,15 @@ if sha1_backend == 'sha1dc'
   libgit_c_args += '-DSHA1DC_NO_STANDARD_INCLUDES=1'
   libgit_c_args += '-DSHA1DC_INIT_SAFE_HASH_DEFAULT=0'
   libgit_c_args += '-DSHA1DC_CUSTOM_INCLUDE_SHA1_C="git-compat-util.h"'
+  libgit_c_args += '-DSHA1DC_CUSTOM_INCLUDE_SHA1DC_FAST_ARM64_C="git-compat-util.h"'
+  libgit_c_args += '-DSHA1DC_CUSTOM_INCLUDE_SHA1DC_FAST_X86_C="git-compat-util.h"'
   libgit_c_args += '-DSHA1DC_CUSTOM_INCLUDE_UBC_CHECK_C="git-compat-util.h"'
 
   libgit_sources += [
     'sha1dc_git.c',
     'sha1dc/sha1.c',
+    'sha1dc/sha1dc_fast_arm64.c',
+    'sha1dc/sha1dc_fast_x86.c',
     'sha1dc/ubc_check.c',
   ]
 endif
