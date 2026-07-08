@@ -541,6 +541,12 @@ include shared.mak
 # use the corresponding implementations for unsafe SHA-1 hashing for
 # non-cryptographic purposes.
 #
+# Define DC_SHA1_UNSAFE to use the sha1collisiondetection library with
+# collision detection disabled for unsafe SHA-1 hashing. This needs no
+# extra library and, where sha1collisiondetection has a hardware fast
+# path, runs at plain hardware SHA-1 speed. Requires the default
+# collision-detecting backend for cryptographic SHA-1.
+#
 # If don't enable any of the *_SHA1 settings in this section, Git will
 # default to its built-in sha1collisiondetection library, which is a
 # collision-detecting sha1 This is slower, but may detect attempted
@@ -2168,6 +2174,9 @@ endif
 endif
 endif
 
+ifdef DC_SHA1_UNSAFE
+	BASIC_CFLAGS += -DSHA1_DC_UNSAFE
+else
 ifdef OPENSSL_SHA1_UNSAFE
 ifndef OPENSSL_SHA1
 	EXTLIBS += $(LIB_4_CRYPTO)
@@ -2184,6 +2193,7 @@ ifdef APPLE_COMMON_CRYPTO_SHA1_UNSAFE
 ifndef APPLE_COMMON_CRYPTO_SHA1
 	COMPAT_CFLAGS += -DCOMMON_DIGEST_FOR_OPENSSL
 	BASIC_CFLAGS += -DSHA1_APPLE_UNSAFE
+endif
 endif
 endif
 endif
