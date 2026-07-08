@@ -1643,6 +1643,8 @@ elif sha256_backend == 'gcrypt'
   gcrypt = dependency('gcrypt')
   libgit_dependencies += gcrypt
   libgit_c_args += '-DSHA256_GCRYPT'
+elif sha256_backend == 'CommonCrypto'
+  libgit_c_args += '-DSHA256_APPLE'
 elif sha256_backend == 'block'
   libgit_c_args += '-DSHA256_BLK'
   libgit_sources += 'sha256/block/sha256.c'
