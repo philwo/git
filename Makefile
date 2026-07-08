@@ -574,6 +574,9 @@ include shared.mak
 #
 # Define GCRYPT_SHA256 to use the SHA-256 routines in libgcrypt.
 #
+# Define APPLE_SHA256 to use the SHA-256 routines in Apple's
+# CommonCrypto (macOS only).
+#
 # If don't enable any of the *_SHA256 settings in this section, Git
 # will default to its built-in sha256 implementation.
 #
@@ -2198,8 +2201,12 @@ ifdef GCRYPT_SHA256
 	BASIC_CFLAGS += -DSHA256_GCRYPT
 	EXTLIBS += -lgcrypt
 else
+ifdef APPLE_SHA256
+	BASIC_CFLAGS += -DSHA256_APPLE
+else
 	LIB_OBJS += sha256/block/sha256.o
 	BASIC_CFLAGS += -DSHA256_BLK
+endif
 endif
 endif
 endif
@@ -3427,6 +3434,9 @@ ifndef NETTLE_SHA256
 endif
 ifndef GCRYPT_SHA256
 	EXCEPT_HDRS += sha256/gcrypt.h
+endif
+ifndef APPLE_SHA256
+	EXCEPT_HDRS += sha256/apple.h
 endif
 CHK_HDRS = $(filter-out $(EXCEPT_HDRS),$(LIB_H))
 HCO = $(patsubst %.h,%.hco,$(CHK_HDRS))
