@@ -14,6 +14,7 @@ void git_SHA1DCInit(SHA1_CTX *);
 #define git_SHA1DCInit	SHA1DCInit
 #endif
 
+void git_SHA1DCInit_unsafe(SHA1_CTX *);
 void git_SHA1DCFinal(unsigned char [20], SHA1_CTX *);
 void git_SHA1DCUpdate(SHA1_CTX *ctx, const void *data, unsigned long len);
 
