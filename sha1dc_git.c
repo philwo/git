@@ -14,6 +14,18 @@ void git_SHA1DCInit(SHA1_CTX *ctx)
 #endif
 
 /*
+ * Same as the regular init, but with collision detection disabled: for
+ * unsafe (non-cryptographic) hashing, where it makes SHA1DCUpdate run
+ * at the speed of the plain SHA-1 compression (in hardware where the
+ * library has a fast path).
+ */
+void git_SHA1DCInit_unsafe(SHA1_CTX *ctx)
+{
+	git_SHA1DCInit(ctx);
+	SHA1DCSetUseDetectColl(ctx, 0);
+}
+
+/*
  * Same as SHA1DCFinal, but convert collision attack case into a verbose die().
  */
 void git_SHA1DCFinal(unsigned char hash[20], SHA1_CTX *ctx)
