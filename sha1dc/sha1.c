@@ -88,7 +88,7 @@
 /*
  * Should define Big Endian for a whitelist of known processors. See
  * https://sourceforge.net/p/predef/wiki/Endianness/ and
- * https://web.archive.org/web/20140421151132/http://www.perforce.com/perforce/doc.current/manuals/p4sag/chapter.superuser.html
+ * http://www.oracle.com/technetwork/server-storage/solaris/portingtosolaris-138514.html
  */
 #define SHA1DC_BIGENDIAN
 
@@ -98,7 +98,7 @@
 /*
  * Defines Big Endian on a whitelist of OSs that are known to be Big
  * Endian-only. See
- * https://lore.kernel.org/git/93056823-2740-d072-1ebd-46b440b33d7e@felt.demon.nl/
+ * https://public-inbox.org/git/93056823-2740-d072-1ebd-46b440b33d7e@felt.demon.nl/
  */
 #define SHA1DC_BIGENDIAN
 
@@ -145,6 +145,73 @@
 #endif
 
 #define sha1_store(W, t, x)	*(volatile uint32_t *)&W[t] = x
+
+/*
+ * SHA1DC_FAST_SHANI: hardware-accelerated fast path (see
+ * sha1dc_fast_x86.c and sha1dc_fast_arm64.c). ubc_check() depends only
+ * on the expanded message words of a block, not on any chaining state. A
+ * block whose dvmask is zero needs no recompression checks, so its
+ * compression output is plain SHA-1 and can be computed with the SHA-NI
+ * (x86-64) or FEAT_SHA1 (aarch64) instructions. Only flagged blocks
+ * (~4.7% for typical data) need the collision-detection work, and because
+ * git runs with safe_hash disabled (a detected collision does not alter
+ * the hash output), that work can happen out of band while the chaining
+ * state always advances via the hardware instructions.
+ *
+ * SHA1DC_FAST_HAVE_TIER1: the x86-64 fast path has an extra AVX2 tier
+ * (scan8/fused8, level 1) for CPUs without AVX-512; aarch64 only has
+ * levels 0 and 2. Each guard must mirror the compile condition of its
+ * sha1dc_fast_*.c file so the extern symbols exist exactly when used.
+ */
+#if defined(__x86_64__) && defined(__GNUC__) && !defined(SHA1DC_NO_FAST_SHANI)
+#define SHA1DC_FAST_SHANI 1
+#define SHA1DC_FAST_HAVE_TIER1 1
+#elif defined(__aarch64__) && defined(__GNUC__) && !defined(SHA1DC_NO_FAST_SHANI) && \
+      (!defined(__BYTE_ORDER__) || __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) && \
+      (defined(__ARM_FEATURE_SHA2) || defined(__clang__) || __GNUC__ >= 8)
+#define SHA1DC_FAST_SHANI 1
+#endif
+
+#ifdef SHA1DC_FAST_SHANI
+extern int sha1dc_fast_level;
+void sha1dc_fast_compress(uint32_t ihv[5], const unsigned char *data, size_t len);
+void sha1dc_fast_compress_ckpt(uint32_t ihv[5], const unsigned char *p,
+			       unsigned nblocks, uint32_t ckpt[][5]);
+uint32_t sha1dc_fast_scan16(const unsigned char *p, uint32_t dvout[16]);
+uint32_t sha1dc_fast_fused16(uint32_t ihv[5], const unsigned char *cur,
+			     const unsigned char *next, uint32_t dvout[16],
+			     uint32_t ckpt[16][5]);
+#ifdef SHA1DC_FAST_HAVE_TIER1
+uint32_t sha1dc_fast_scan8(const unsigned char *p, uint32_t dvout[8]);
+uint32_t sha1dc_fast_fused8(uint32_t ihv[5], const unsigned char *cur,
+			    const unsigned char *next, uint32_t dvout[8],
+			    uint32_t ckpt[8][5]);
+#endif
+void sha1dc_fast_states(const unsigned char *block, uint32_t W[80],
+			const uint32_t ihvin[5],
+			uint32_t state58[5], uint32_t state65[5]);
+
+#if defined(__clang__)
+#define SHA1DC_NOVECTOR _Pragma("clang loop vectorize(disable)")
+#elif __GNUC__ >= 14
+#define SHA1DC_NOVECTOR _Pragma("GCC novector")
+#else
+#define SHA1DC_NOVECTOR
+#endif
+
+static void sha1_expand_block(const unsigned char *p, uint32_t W[80])
+{
+	unsigned t;
+	for (t = 0; t < 16; ++t)
+		W[t] = ((uint32_t)p[t * 4] << 24) | ((uint32_t)p[t * 4 + 1] << 16)
+		     | ((uint32_t)p[t * 4 + 2] << 8) | (uint32_t)p[t * 4 + 3];
+	/* Auto-vectorizing this recurrence causes store-forwarding stalls
+	 * that make it several times slower than plain scalar code. */
+SHA1DC_NOVECTOR
+	for (t = 16; t < 80; ++t)
+		W[t] = sha1_mix(W, t);
+}
+#endif /* SHA1DC_FAST_SHANI */
 
 #define sha1_f1(b,c,d) ((d)^((b)&((c)^(d))))
 #define sha1_f2(b,c,d) ((b)^(c)^(d))
@@ -976,43 +1043,43 @@ static void sha1recompress_fast_ ## t (uint32_t ihvin[5], uint32_t ihvout[5], co
 #pragma warning(disable: 4127)  /* Compiler complains about the checks in the above macro being constant. */
 #endif
 
-#ifdef DOSTORESTATE0
+#ifdef DOSTORESTATE00
 SHA1_RECOMPRESS(0)
 #endif
 
-#ifdef DOSTORESTATE1
+#ifdef DOSTORESTATE01
 SHA1_RECOMPRESS(1)
 #endif
 
-#ifdef DOSTORESTATE2
+#ifdef DOSTORESTATE02
 SHA1_RECOMPRESS(2)
 #endif
 
-#ifdef DOSTORESTATE3
+#ifdef DOSTORESTATE03
 SHA1_RECOMPRESS(3)
 #endif
 
-#ifdef DOSTORESTATE4
+#ifdef DOSTORESTATE04
 SHA1_RECOMPRESS(4)
 #endif
 
-#ifdef DOSTORESTATE5
+#ifdef DOSTORESTATE05
 SHA1_RECOMPRESS(5)
 #endif
 
-#ifdef DOSTORESTATE6
+#ifdef DOSTORESTATE06
 SHA1_RECOMPRESS(6)
 #endif
 
-#ifdef DOSTORESTATE7
+#ifdef DOSTORESTATE07
 SHA1_RECOMPRESS(7)
 #endif
 
-#ifdef DOSTORESTATE8
+#ifdef DOSTORESTATE08
 SHA1_RECOMPRESS(8)
 #endif
 
-#ifdef DOSTORESTATE9
+#ifdef DOSTORESTATE09
 SHA1_RECOMPRESS(9)
 #endif
 
@@ -1304,52 +1371,52 @@ static void sha1_recompression_step(uint32_t step, uint32_t ihvin[5], uint32_t i
 {
 	switch (step)
 	{
-#ifdef DOSTORESTATE0
+#ifdef DOSTORESTATE00
 	case 0:
 		sha1recompress_fast_0(ihvin, ihvout, me2, state);
 		break;
 #endif
-#ifdef DOSTORESTATE1
+#ifdef DOSTORESTATE01
 	case 1:
 		sha1recompress_fast_1(ihvin, ihvout, me2, state);
 		break;
 #endif
-#ifdef DOSTORESTATE2
+#ifdef DOSTORESTATE02
 	case 2:
 		sha1recompress_fast_2(ihvin, ihvout, me2, state);
 		break;
 #endif
-#ifdef DOSTORESTATE3
+#ifdef DOSTORESTATE03
 	case 3:
 		sha1recompress_fast_3(ihvin, ihvout, me2, state);
 		break;
 #endif
-#ifdef DOSTORESTATE4
+#ifdef DOSTORESTATE04
 	case 4:
 		sha1recompress_fast_4(ihvin, ihvout, me2, state);
 		break;
 #endif
-#ifdef DOSTORESTATE5
+#ifdef DOSTORESTATE05
 	case 5:
 		sha1recompress_fast_5(ihvin, ihvout, me2, state);
 		break;
 #endif
-#ifdef DOSTORESTATE6
+#ifdef DOSTORESTATE06
 	case 6:
 		sha1recompress_fast_6(ihvin, ihvout, me2, state);
 		break;
 #endif
-#ifdef DOSTORESTATE7
+#ifdef DOSTORESTATE07
 	case 7:
 		sha1recompress_fast_7(ihvin, ihvout, me2, state);
 		break;
 #endif
-#ifdef DOSTORESTATE8
+#ifdef DOSTORESTATE08
 	case 8:
 		sha1recompress_fast_8(ihvin, ihvout, me2, state);
 		break;
 #endif
-#ifdef DOSTORESTATE9
+#ifdef DOSTORESTATE09
 	case 9:
 		sha1recompress_fast_9(ihvin, ihvout, me2, state);
 		break;
@@ -1712,6 +1779,47 @@ static void sha1_recompression_step(uint32_t step, uint32_t ihvin[5], uint32_t i
 
 
 
+#ifdef SHA1DC_FAST_SHANI
+/*
+ * Verify a flagged block out of band: the chaining state has already been
+ * advanced with SHA-NI (valid because safe_hash is off, so a collision
+ * does not alter the hash output). ihvin and ihvout are the chaining
+ * values entering and leaving the block, both known from the SHA-NI
+ * checkpoints; dvmask is the block's ubc_check result computed by the
+ * vector scan. So the only compression state recomputed here is the
+ * working state at the recompression steps (58 and 65), which
+ * sha1dc_fast_states produces mostly with SHA-NI.
+ */
+static void sha1_verify_flagged(SHA1_CTX *ctx, const uint32_t ihvin[5],
+				const uint32_t ihvout[5],
+				const unsigned char *blockp, uint32_t dvmask)
+{
+	uint32_t ihvtmp[5];
+	uint32_t state58[5], state65[5];
+	unsigned i, j;
+
+	sha1dc_fast_states(blockp, ctx->m1, ihvin, state58, state65);
+	for (i = 0; sha1_dvs[i].dvType != 0; ++i)
+	{
+		if (dvmask & ((uint32_t)(1) << sha1_dvs[i].maskb))
+		{
+			for (j = 0; j < 80; ++j)
+				ctx->m2[j] = ctx->m1[j] ^ sha1_dvs[i].dm[j];
+
+			sha1_recompression_step(sha1_dvs[i].testt, ctx->ihv2, ihvtmp, ctx->m2,
+						sha1_dvs[i].testt == 58 ? state58 : state65);
+
+			if ((0 == ((ihvtmp[0] ^ ihvout[0]) | (ihvtmp[1] ^ ihvout[1]) | (ihvtmp[2] ^ ihvout[2]) | (ihvtmp[3] ^ ihvout[3]) | (ihvtmp[4] ^ ihvout[4])))
+				|| (ctx->reduced_round_coll && 0 == ((ihvin[0] ^ ctx->ihv2[0]) | (ihvin[1] ^ ctx->ihv2[1]) | (ihvin[2] ^ ctx->ihv2[2]) | (ihvin[3] ^ ctx->ihv2[3]) | (ihvin[4] ^ ctx->ihv2[4]))))
+			{
+				ctx->found_collision = 1;
+				break;
+			}
+		}
+	}
+}
+#endif /* SHA1DC_FAST_SHANI */
+
 static void sha1_process(SHA1_CTX* ctx, const uint32_t block[16])
 {
 	unsigned i, j;
@@ -1837,6 +1945,128 @@ void SHA1DCUpdate(SHA1_CTX* ctx, const char* buf, size_t len)
 		len -= fill;
 		left = 0;
 	}
+#ifdef SHA1DC_FAST_SHANI
+	if (sha1dc_fast_level && ctx->detect_coll && ctx->ubc_check && !ctx->safe_hash)
+	{
+		if (sha1dc_fast_level >= 2 && len >= 1024)
+		{
+			/*
+			 * Process 16-block groups. The fused kernel compresses
+			 * the current group with SHA-NI while scanning the
+			 * next group with AVX-512 in the shadow of the
+			 * latency-bound sha1rnds4 chain, and checkpoints the
+			 * chaining value entering each block. Flagged blocks
+			 * are then verified out of band.
+			 */
+			uint32_t dvs[16], nextdvs[16];
+			uint32_t ckpt[16][5];
+			uint32_t flags = sha1dc_fast_scan16((const unsigned char *)buf, dvs);
+
+			for (;;)
+			{
+				uint32_t nextflags = 0;
+				int have_next = (len >= 2048);
+
+				if (have_next)
+					nextflags = sha1dc_fast_fused16(ctx->ihv, (const unsigned char *)buf,
+									(const unsigned char *)buf + 1024, nextdvs, ckpt);
+				else
+					sha1dc_fast_compress_ckpt(ctx->ihv, (const unsigned char *)buf, 16, ckpt);
+				if (flags)
+				{
+					unsigned i;
+
+					for (i = 0; i < 16; i++)
+						if (flags & (1u << i))
+							sha1_verify_flagged(ctx, ckpt[i],
+									    i < 15 ? ckpt[i + 1] : ctx->ihv,
+									    (const unsigned char *)buf + i * 64, dvs[i]);
+				}
+				ctx->total += 1024;
+				buf += 1024;
+				len -= 1024;
+				if (!have_next)
+					break;
+				flags = nextflags;
+				memcpy(dvs, nextdvs, sizeof(dvs));
+			}
+		}
+#ifdef SHA1DC_FAST_HAVE_TIER1
+		else if (sha1dc_fast_level == 1 && len >= 512)
+		{
+			/*
+			 * AVX2 tier: 8-block groups, same structure as the
+			 * AVX-512 tier above. The fused kernel compresses the
+			 * current group with SHA-NI while scanning the next
+			 * one with AVX2; flagged blocks are verified out of
+			 * band using the checkpointed chaining values.
+			 */
+			uint32_t dvs[8], nextdvs[8];
+			uint32_t ckpt[8][5];
+			uint32_t flags = sha1dc_fast_scan8((const unsigned char *)buf, dvs);
+
+			for (;;)
+			{
+				uint32_t nextflags = 0;
+				int have_next = (len >= 1024);
+
+				if (have_next)
+					nextflags = sha1dc_fast_fused8(ctx->ihv, (const unsigned char *)buf,
+								       (const unsigned char *)buf + 512, nextdvs, ckpt);
+				else
+					sha1dc_fast_compress_ckpt(ctx->ihv, (const unsigned char *)buf, 8, ckpt);
+				if (flags)
+				{
+					unsigned i;
+
+					for (i = 0; i < 8; i++)
+						if (flags & (1u << i))
+							sha1_verify_flagged(ctx, ckpt[i],
+									    i < 7 ? ckpt[i + 1] : ctx->ihv,
+									    (const unsigned char *)buf + i * 64, dvs[i]);
+				}
+				ctx->total += 512;
+				buf += 512;
+				len -= 512;
+				if (!have_next)
+					break;
+				flags = nextflags;
+				memcpy(dvs, nextdvs, sizeof(dvs));
+			}
+		}
+#endif /* SHA1DC_FAST_HAVE_TIER1 */
+		/* tail: fewer than one group of blocks */
+		while (len >= 64)
+		{
+			uint32_t W[80], dvmask[DVMASKSIZE];
+
+			sha1_expand_block((const unsigned char *)buf, W);
+			ubc_check(W, dvmask);
+			ctx->total += 64;
+			if (dvmask[0])
+			{
+				memcpy(ctx->buffer, buf, 64);
+				sha1_process(ctx, (uint32_t *)(ctx->buffer));
+			}
+			else
+				sha1dc_fast_compress(ctx->ihv, (const unsigned char *)buf, 64);
+			buf += 64;
+			len -= 64;
+		}
+	}
+	else if (sha1dc_fast_level && !ctx->detect_coll)
+	{
+		size_t n = len & ~(size_t)63;
+
+		if (n)
+		{
+			sha1dc_fast_compress(ctx->ihv, (const unsigned char *)buf, n);
+			ctx->total += n;
+			buf += n;
+			len -= n;
+		}
+	}
+#endif /* SHA1DC_FAST_SHANI */
 	while (len >= 64)
 	{
 		ctx->total += 64;
