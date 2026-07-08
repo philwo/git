@@ -66,6 +66,9 @@
 #    define SHA256_NEEDS_CLONE_HELPER
 #    include "sha256/openssl.h"
 #  endif
+#elif defined(SHA256_APPLE)
+#define SHA256_BACKEND "SHA256_APPLE"
+#include "sha256/apple.h"
 #else
 #define SHA256_BACKEND "SHA256_BLK"
 #include "sha256/block/sha256.h"
