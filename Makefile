@@ -2148,7 +2148,12 @@ ifdef DC_SHA1_SUBMODULE
 	BASIC_CFLAGS += -DDC_SHA1_SUBMODULE
 else
 	LIB_OBJS += sha1dc/sha1.o
+	LIB_OBJS += sha1dc/sha1dc_fast_arm64.o
+	LIB_OBJS += sha1dc/sha1dc_fast_x86.o
 	LIB_OBJS += sha1dc/ubc_check.o
+	BASIC_CFLAGS += \
+		-DSHA1DC_CUSTOM_INCLUDE_SHA1DC_FAST_ARM64_C="\"git-compat-util.h\"" \
+		-DSHA1DC_CUSTOM_INCLUDE_SHA1DC_FAST_X86_C="\"git-compat-util.h\""
 endif
 	BASIC_CFLAGS += \
 		-DSHA1DC_NO_STANDARD_INCLUDES \
