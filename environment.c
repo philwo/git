@@ -20,6 +20,7 @@
 #include "environment.h"
 #include "gettext.h"
 #include "git-zlib.h"
+#include "hash.h"
 #include "ident.h"
 #include "lockfile.h"
 #include "mailmap.h"
@@ -707,6 +708,12 @@ int git_default_config(const char *var, const char *value,
 
 	if (starts_with(var, "sparse."))
 		return git_default_sparse_config(var, value);
+
+	/* The per-URL variant hash.<url>.collisionDetection does not match. */
+	if (!strcmp(var, "hash.collisiondetection")) {
+		hash_sha1_set_collision_detection(git_config_bool(var, value));
+		return 0;
+	}
 
 	/* Add other config variables here and to Documentation/config.adoc. */
 	return 0;
