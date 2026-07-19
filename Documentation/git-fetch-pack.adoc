@@ -112,6 +112,14 @@ be in a separate packet, and the list must end with a flush packet.
 	Output "connectivity-ok" if the received pack is
 	self-contained and connected.
 
+--collision-check::
+--no-collision-check::
+	Enable or disable SHA-1 collision detection for the received
+	objects, passed on to 'git index-pack' or 'git unpack-objects'.
+	Without either option, the `hash.<url>.collisionDetection`
+	configuration is resolved against <repository>. See
+	linkgit:git-config[1].
+
 -v::
 	Run verbosely.
 

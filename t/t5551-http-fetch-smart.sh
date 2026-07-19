@@ -791,4 +791,13 @@ test_expect_success 'ls-remote outside repo does not segfault with fetch refspec
 		ls-remote origin
 '
 
+test_expect_success 'v0 fetch resolves hash.<url>.collisionDetection' '
+	test_when_finished "rm -rf collision-clone trace-collision" &&
+	GIT_TRACE2_EVENT="$PWD/trace-collision" \
+	git -c protocol.version=0 \
+		-c "hash.$HTTPD_URL/smart/repo.git.collisionDetection=false" \
+		clone $HTTPD_URL/smart/repo.git collision-clone &&
+	test_grep "\"--no-collision-check\"" trace-collision
+'
+
 test_done

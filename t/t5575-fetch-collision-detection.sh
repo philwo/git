@@ -76,4 +76,21 @@ test_expect_success 'clone honors the per-URL config' '
 	test_grep "\"--no-collision-check\"" trace8
 '
 
+test_expect_success 'fetch-pack resolves the per-URL config itself' '
+	git init client9 &&
+	GIT_TRACE2_EVENT="$(pwd)/trace9" git -C client9 \
+		-c "hash.$URL.collisionDetection=false" \
+		fetch-pack "$URL" HEAD &&
+	test_grep "\"--no-collision-check\"" trace9
+'
+
+test_expect_success 'fetch-pack --collision-check overrides the config' '
+	git init client10 &&
+	GIT_TRACE2_EVENT="$(pwd)/trace10" git -C client10 \
+		-c "hash.$URL.collisionDetection=false" \
+		fetch-pack --collision-check "$URL" HEAD &&
+	test_grep "\"--collision-check\"" trace10 &&
+	! grep "no-collision-check" trace10
+'
+
 test_done
