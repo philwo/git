@@ -1,0 +1,15 @@
+hash.collisionDetection::
+	When set to `false`, Git computes SHA-1 object hashes without
+	checking for signs of a collision attack. This is faster, but it
+	removes Git's defense against maliciously crafted colliding
+	objects. Only disable it when every object entering the
+	repository has already been vetted elsewhere, for example by a
+	hosting service that runs collision detection on push. Defaults
+	to `true`.
++
+This setting only has an effect when Git was built with a SHA-1
+implementation that performs collision detection and a separate one
+that does not. Such builds show a `non-collision-detecting-SHA-1`
+line in the output of `git version --build-options`. The setting is
+silently ignored otherwise, and it never affects SHA-256
+repositories.
