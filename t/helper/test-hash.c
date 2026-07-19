@@ -12,6 +12,12 @@ int cmd_hash_impl(int ac, const char **av, int algo, int unsafe)
 	if (unsafe)
 		algop = unsafe_hash_algo(algop);
 
+	if (ac >= 2 && !strcmp(av[1], "--no-collision-check")) {
+		hash_sha1_set_collision_detection(0);
+		av++;
+		ac--;
+	}
+
 	if (ac == 2) {
 		if (!strcmp(av[1], "-b"))
 			binary = 1;
