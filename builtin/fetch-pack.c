@@ -15,7 +15,8 @@
 static const char fetch_pack_usage[] =
 "git fetch-pack [--all] [--stdin] [--quiet | -q] [--keep | -k] [--thin] "
 "[--include-tag] [--upload-pack=<git-upload-pack>] [--depth=<n>] "
-"[--no-progress] [--diag-url] [-v] [<host>:]<directory> [<refs>...]";
+"[--no-progress] [--diag-url] [--[no-]collision-check] [-v] "
+"[<host>:]<directory> [<refs>...]";
 
 static void add_sought_entry(struct ref ***sought, int *nr, int *alloc,
 			     const char *name)
@@ -170,6 +171,14 @@ int cmd_fetch_pack(int argc,
 			args.refetch = 1;
 			continue;
 		}
+		if (!strcmp("--collision-check", arg)) {
+			args.collision_check = COLLISION_CHECK_ON;
+			continue;
+		}
+		if (!strcmp("--no-collision-check", arg)) {
+			args.collision_check = COLLISION_CHECK_OFF;
+			continue;
+		}
 		if (skip_prefix(arg, ("--filter="), &arg)) {
 			parse_list_objects_filter(&args.filter_options, arg);
 			continue;
@@ -187,6 +196,13 @@ int cmd_fetch_pack(int argc,
 		dest = argv[i++];
 	else
 		usage(fetch_pack_usage);
+
+	/*
+	 * Direct and stateless-rpc invocations bypass the transport
+	 * code that resolves this for git fetch, so resolve it here.
+	 */
+	if (args.collision_check == COLLISION_CHECK_UNSET)
+		args.collision_check = fetch_collision_check_for_url(dest);
 
 	/*
 	 * Copy refs from cmdline to growable list, then append any
