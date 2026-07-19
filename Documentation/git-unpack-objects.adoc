@@ -9,7 +9,7 @@ git-unpack-objects - Unpack objects from a packed archive
 SYNOPSIS
 --------
 [verse]
-'git unpack-objects' [-n] [-q] [-r] [--strict]
+'git unpack-objects' [-n] [-q] [-r] [--strict] [--[no-]collision-check]
 
 
 DESCRIPTION
@@ -43,6 +43,13 @@ OPTIONS
 
 --strict::
 	Don't write objects with broken content or links.
+
+--collision-check::
+--no-collision-check::
+	Enable or disable SHA-1 collision detection while hashing the
+	unpacked objects, overriding the `hash.collisionDetection`
+	configuration variable. See linkgit:git-config[1] for the
+	security implications.
 
 --max-input-size=<size>::
 	Die, if the pack is larger than <size>.
