@@ -712,6 +712,7 @@ integration_tests = [
   't5572-pull-submodule.sh',
   't5573-pull-verify-signatures.sh',
   't5574-fetch-output.sh',
+  't5575-fetch-collision-detection.sh',
   't5580-unc-paths.sh',
   't5581-http-curl-verbose.sh',
   't5582-fetch-negative-refspec.sh',

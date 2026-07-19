@@ -37,6 +37,7 @@
 #include "mergesort.h"
 #include "prio-queue.h"
 #include "promisor-remote.h"
+#include "urlmatch.h"
 
 static int transfer_unpack_limit = -1;
 static int fetch_unpack_limit = -1;
@@ -1061,6 +1062,11 @@ static int get_pack(struct fetch_pack_args *args,
 			strvec_pushf(&cmd.args, "--strict%s",
 				     fsck_msg_types.buf);
 	}
+
+	if (args->collision_check == COLLISION_CHECK_ON)
+		strvec_push(&cmd.args, "--collision-check");
+	else if (args->collision_check == COLLISION_CHECK_OFF)
+		strvec_push(&cmd.args, "--no-collision-check");
 
 	if (index_pack_args)
 		strvec_pushv(index_pack_args, cmd.args.v);
@@ -2163,6 +2169,44 @@ int fetch_pack_fsck_objects(void)
 	if (transfer_fsck_objects >= 0)
 		return transfer_fsck_objects;
 	return 0;
+}
+
+static int collision_check_option(const char *var, const char *value,
+				  const struct config_context *ctx UNUSED,
+				  void *cb)
+{
+	enum collision_check_setting *setting = cb;
+
+	*setting = git_config_bool(var, value) ?
+		COLLISION_CHECK_ON : COLLISION_CHECK_OFF;
+	return 0;
+}
+
+enum collision_check_setting fetch_collision_check_for_url(const char *url)
+{
+	enum collision_check_setting setting = COLLISION_CHECK_UNSET;
+	struct urlmatch_config config = URLMATCH_CONFIG_INIT;
+	char *normalized_url;
+
+	if (!url)
+		return COLLISION_CHECK_UNSET;
+
+	config.section = "hash";
+	config.key = "collisiondetection";
+	config.collect_fn = collision_check_option;
+	config.cb = &setting;
+
+	/*
+	 * On normalization failure (e.g. scp-style URLs), URL-specific
+	 * keys never match and only a plain hash.collisionDetection can
+	 * be collected.
+	 */
+	normalized_url = url_normalize(url, &config.url);
+	repo_config(the_repository, urlmatch_config_entry, &config);
+	free(normalized_url);
+	string_list_clear(&config.vars, 1);
+
+	return setting;
 }
 
 struct ref *fetch_pack(struct fetch_pack_args *args,

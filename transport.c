@@ -467,6 +467,7 @@ static int fetch_refs_via_pack(struct transport *transport,
 	args.negotiation_restrict_tips = data->options.negotiation_restrict_tips;
 	args.negotiation_include_tips = data->options.negotiation_include_tips;
 	args.reject_shallow_remote = transport->smart_options->reject_shallow;
+	args.collision_check = fetch_collision_check_for_url(transport->url);
 
 	if (!data->finished_handshake) {
 		int i;
