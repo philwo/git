@@ -23,7 +23,7 @@
 #include "packfile.h"
 
 static int dry_run, quiet, recover, has_errors, strict;
-static const char unpack_usage[] = "git unpack-objects [-n] [-q] [-r] [--strict]";
+static const char unpack_usage[] = "git unpack-objects [-n] [-q] [-r] [--strict] [--[no-]collision-check]";
 
 static unsigned char buffer[DEFAULT_IO_BUFFER_SIZE];
 static unsigned int offset, len;
@@ -652,6 +652,19 @@ int cmd_unpack_objects(int argc,
 			if (skip_prefix(arg, "--strict=", &arg)) {
 				strict = 1;
 				fsck_set_msg_types(&fsck_options, arg);
+				continue;
+			}
+			if (!strcmp(arg, "--collision-check")) {
+				hash_sha1_set_collision_detection(1);
+				continue;
+			}
+			if (!strcmp(arg, "--no-collision-check")) {
+#ifndef SHA1_UNSAFE_BACKEND
+				warning(_("--no-collision-check has no effect: "
+					  "no non-collision-detecting SHA-1 "
+					  "backend is compiled in"));
+#endif
+				hash_sha1_set_collision_detection(0);
 				continue;
 			}
 			if (skip_prefix(arg, "--pack_header=", &arg)) {
