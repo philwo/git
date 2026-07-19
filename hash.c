@@ -1,6 +1,14 @@
 #include "git-compat-util.h"
 #include "hash.h"
 #include "hex.h"
+#include "trace2.h"
+
+/*
+ * Runtime switch for SHA-1 collision detection (hash.collisionDetection).
+ * Only mutated during single-threaded startup, from config or option
+ * parsing; the SHA-1 init function reads it for every new context.
+ */
+static int sha1_collision_detection = 1;
 
 static const struct object_id empty_tree_oid = {
 	.hash = {
@@ -43,8 +51,19 @@ static const struct object_id null_oid_sha256 = {
 	.algo = GIT_HASH_SHA256,
 };
 
+static void git_hash_sha1_init_unsafe(struct git_hash_ctx *ctx);
+
 static void git_hash_sha1_init(struct git_hash_ctx *ctx)
 {
+	if (!sha1_collision_detection) {
+		/*
+		 * Delegate to the unsafe backend. The context is tagged
+		 * with the unsafe algop, so all later operations must go
+		 * through the ctx-dispatched git_hash_*() helpers.
+		 */
+		git_hash_sha1_init_unsafe(ctx);
+		return;
+	}
 	ctx->algop = &hash_algos[GIT_HASH_SHA1];
 	git_SHA1_Init(&ctx->state.sha1);
 }
@@ -307,6 +326,13 @@ uint32_t hash_algo_by_length(size_t len)
 		if (len == hash_algos[i].rawsz)
 			return i;
 	return GIT_HASH_UNKNOWN;
+}
+
+void hash_sha1_set_collision_detection(int enabled)
+{
+	sha1_collision_detection = !!enabled;
+	trace2_data_intmax("hash", NULL, "sha1-collision-detection",
+			   sha1_collision_detection);
 }
 
 const struct git_hash_algo *unsafe_hash_algo(const struct git_hash_algo *algop)

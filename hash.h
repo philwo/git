@@ -351,6 +351,14 @@ static inline uint32_t hash_algo_by_ptr(const struct git_hash_algo *p)
 
 const struct git_hash_algo *unsafe_hash_algo(const struct git_hash_algo *algop);
 
+/*
+ * Enable or disable SHA-1 collision detection at runtime. With detection
+ * disabled, new SHA-1 contexts use the unsafe backend. Without a distinct
+ * unsafe backend compiled in, disabling has no effect. Only call this
+ * during single-threaded startup.
+ */
+void hash_sha1_set_collision_detection(int enabled);
+
 const struct object_id *null_oid(const struct git_hash_algo *algop);
 
 static inline int hashcmp(const unsigned char *sha1, const unsigned char *sha2, const struct git_hash_algo *algop)
