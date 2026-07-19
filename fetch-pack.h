@@ -8,6 +8,17 @@
 
 struct oid_array;
 
+/*
+ * Whether the spawned index-pack/unpack-objects should run SHA-1
+ * collision detection. UNSET passes no option, so the child follows
+ * its own hash.collisionDetection config.
+ */
+enum collision_check_setting {
+	COLLISION_CHECK_UNSET = 0,
+	COLLISION_CHECK_ON,
+	COLLISION_CHECK_OFF,
+};
+
 struct fetch_pack_args {
 	const char *uploadpack;
 	int unpacklimit;
@@ -23,6 +34,9 @@ struct fetch_pack_args {
 	 */
 	const struct oid_array *negotiation_restrict_tips;
 	const struct oid_array *negotiation_include_tips;
+
+	/* Resolved from hash.<url>.collisionDetection for the remote URL. */
+	enum collision_check_setting collision_check;
 
 	unsigned deepen_relative:1;
 	unsigned quiet:1;
@@ -118,5 +132,12 @@ int fetch_pack_fsck_objects(void);
  */
 int fetch_pack_fsck_config(const char *var, const char *value,
 			   struct strbuf *msg_types);
+
+/*
+ * Resolve the hash.<url>.collisionDetection configuration for the given
+ * URL. The most specific matching URL pattern wins; a plain
+ * hash.collisionDetection serves as the fallback.
+ */
+enum collision_check_setting fetch_collision_check_for_url(const char *url);
 
 #endif

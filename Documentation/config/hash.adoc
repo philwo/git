@@ -13,3 +13,26 @@ that does not. Such builds show a `non-collision-detecting-SHA-1`
 line in the output of `git version --build-options`. The setting is
 silently ignored otherwise, and it never affects SHA-256
 repositories.
+
+hash.<url>.collisionDetection::
+	Use this setting instead of `hash.collisionDetection` for the
+	objects received when fetching from a URL matching `<url>`.
+	`git fetch` passes the resolved setting to the spawned
+	`git index-pack` or `git unpack-objects` as
+	`--[no-]collision-check`, which overrides the configuration of
+	the receiving repository. A value of `true` forces collision
+	detection on even when `hash.collisionDetection` is `false`.
++
+`<url>` is matched against the fetch URL after `url.<base>.insteadOf`
+rewriting, following the same rules as for `http.<url>.*`. The most
+specific match wins, and a plain `hash.collisionDetection` serves as
+the fallback. URLs that are not of the `<scheme>://` form, such as
+scp-style ones, never match a URL pattern and only use the fallback.
++
+Use this to skip collision detection for hosts that already run it
+on the server side, for example:
++
+----
+[hash "https://*.googlesource.com"]
+	collisionDetection = false
+----
