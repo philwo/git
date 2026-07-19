@@ -110,6 +110,15 @@ change the severity of some possible issues, e.g.,
 `fsck.<msg-id>` configuration options in linkgit:git-fsck[1] for more
 information on the possible values of `<msg-id>` and `<severity>`.
 
+--collision-check::
+--no-collision-check::
+	Enable or disable SHA-1 collision detection while hashing the
+	objects in the pack, overriding the `hash.collisionDetection`
+	configuration variable. See linkgit:git-config[1] for the
+	security implications. `git fetch` passes this option based on
+	the `hash.<url>.collisionDetection` configuration for the
+	remote it fetches from.
+
 --threads=<n>::
 	Specifies the number of threads to spawn when resolving
 	deltas. This requires that index-pack be compiled with
