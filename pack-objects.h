@@ -127,6 +127,8 @@ struct object_entry {
 struct packing_region {
 	size_t start;
 	size_t nr;
+	/* Total object bytes in the region, as a work estimate. */
+	size_t weight;
 };
 
 struct packing_data {
