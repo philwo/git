@@ -26,6 +26,8 @@
 #include "pack-revindex.h"
 #include "promisor-remote.h"
 #include "pack-mtimes.h"
+#include "parse.h"
+#include "trace2.h"
 #include "ewah/ewok.h"
 
 char *odb_pack_name(struct repository *r, struct strbuf *buf,
@@ -1537,11 +1539,38 @@ static void *cache_or_unpack_entry(struct repository *r, struct packed_git *p,
 	return xmemdupz(ent->data, ent->size);
 }
 
+static void *packed_read_object_copyout(struct repository *r,
+					struct packed_git *p,
+					off_t obj_offset,
+					enum object_type *type,
+					size_t *sizep);
+
+static int pack_copyout_env = -1;
+
+void pack_copyout_read_env(void)
+{
+	if (pack_copyout_env < 0)
+		pack_copyout_env = git_env_bool("GIT_TEST_PACK_COPYOUT", 2);
+}
+
+static int use_pack_copyout(void)
+{
+	pack_copyout_read_env();
+	return pack_copyout_env == 1 ||
+	       (pack_copyout_env == 2 && obj_read_use_lock);
+}
+
 void *packed_read_object(struct repository *r, struct packed_git *p,
 			 off_t obj_offset, enum object_type *type,
 			 size_t *sizep)
 {
 	void *data;
+
+	if (use_pack_copyout()) {
+		data = packed_read_object_copyout(r, p, obj_offset, type, sizep);
+		if (data)
+			return data;
+	}
 
 	obj_read_lock();
 	data = cache_or_unpack_entry(r, p, obj_offset, sizep, type);
@@ -1796,6 +1825,33 @@ struct unpack_entry_stack_ent {
 	size_t size;
 };
 
+/*
+ * Delta chains overlap, so the same entry is traversed many times;
+ * verify its CRC only on the first visit. This trades away
+ * re-detection when a clean page is evicted and later re-read from a
+ * failing disk; fsck stays the thorough check. Returns non-zero on a
+ * CRC mismatch; the caller owns error reporting.
+ */
+static int pack_crc_check_once(struct packed_git *p,
+			       struct pack_window **w_curs,
+			       uint32_t pack_pos, off_t obj_offset)
+{
+	off_t len;
+
+	if (!p->crc_checked)
+		p->crc_checked = bitmap_word_alloc(((size_t)p->num_objects +
+						    BITS_IN_EWORD - 1) /
+						   BITS_IN_EWORD);
+	if (bitmap_get(p->crc_checked, pack_pos))
+		return 0;
+	len = pack_pos_to_offset(p, pack_pos + 1) - obj_offset;
+	if (check_pack_crc(p, w_curs, obj_offset, len,
+			   pack_pos_to_index(p, pack_pos)))
+		return -1;
+	bitmap_set(p->crc_checked, pack_pos);
+	return 0;
+}
+
 void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
 		   enum object_type *final_type, size_t *final_size)
 {
@@ -1830,8 +1886,7 @@ void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
 		}
 
 		if (do_check_packed_object_crc && p->index_version > 1) {
-			uint32_t pack_pos, index_pos;
-			off_t len;
+			uint32_t pack_pos;
 
 			if (offset_to_pack_pos(p, obj_offset, &pack_pos) < 0) {
 				error("could not find object at offset %"PRIuMAX" in pack %s",
@@ -1840,30 +1895,16 @@ void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
 				goto out;
 			}
 
-			/*
-			 * Delta chains overlap, so the same entry is
-			 * traversed many times; verify its CRC only on the
-			 * first visit. This trades away re-detection when a
-			 * clean page is evicted and later re-read from a
-			 * failing disk; fsck stays the thorough check.
-			 */
-			if (!p->crc_checked)
-				p->crc_checked = bitmap_word_alloc(
-					((size_t)p->num_objects +
-					 BITS_IN_EWORD - 1) / BITS_IN_EWORD);
-			if (!bitmap_get(p->crc_checked, pack_pos)) {
-				len = pack_pos_to_offset(p, pack_pos + 1) - obj_offset;
-				index_pos = pack_pos_to_index(p, pack_pos);
-				if (check_pack_crc(p, &w_curs, obj_offset, len, index_pos)) {
-					struct object_id oid;
-					nth_packed_object_id(&oid, p, index_pos);
-					error("bad packed object CRC for %s",
-					      oid_to_hex(&oid));
-					mark_bad_packed_object(p, &oid);
-					data = NULL;
-					goto out;
-				}
-				bitmap_set(p->crc_checked, pack_pos);
+			if (pack_crc_check_once(p, &w_curs, pack_pos,
+						obj_offset)) {
+				struct object_id oid;
+				nth_packed_object_id(&oid, p,
+						     pack_pos_to_index(p, pack_pos));
+				error("bad packed object CRC for %s",
+				      oid_to_hex(&oid));
+				mark_bad_packed_object(p, &oid);
+				data = NULL;
+				goto out;
 			}
 		}
 
@@ -2032,6 +2073,352 @@ out:
 	if (delta_stack != small_delta_stack)
 		free(delta_stack);
 
+	return data;
+}
+
+/*
+ * Copy-out fast path for packed_read_object(). unpack_entry() releases
+ * and retakes the object read lock around every inflate and delta
+ * application; with many threads reading small objects those handoffs
+ * dominate. Instead, walk the chain once under the lock and only
+ * memcpy each level's compressed bytes into a private buffer, then
+ * inflate and apply the deltas without the lock. The bytes and
+ * operations are the same, so the result is identical to
+ * unpack_entry()'s.
+ *
+ * The gates bound the time spent copying under the lock. Anything
+ * unusual (deep chain, large payload, damaged data) falls back to
+ * unpack_entry(), which owns all error handling and corruption
+ * recovery; the fast path itself reports nothing.
+ */
+#define PACK_COPYOUT_MAX_LEVELS 64
+#define PACK_COPYOUT_MAX_BYTES (64 * 1024)
+
+struct pack_copyout_level {
+	off_t obj_offset;
+	size_t size;	/* inflated size, from the object header */
+	size_t zofs;	/* compressed bytes' position in scratch */
+	size_t zlen;
+};
+
+struct pack_copyout {
+	struct pack_copyout_level levels[PACK_COPYOUT_MAX_LEVELS];
+	int nr;
+	size_t scratch_used;
+	/* The innermost base when it came from the delta base cache. */
+	void *cached_base;
+	size_t cached_size;
+	off_t cached_offset;
+	enum object_type type;
+	unsigned char scratch[PACK_COPYOUT_MAX_BYTES];
+};
+
+static void copy_pack_bytes(struct packed_git *p, struct pack_window **w_curs,
+			    off_t offset, size_t len, unsigned char *dst)
+{
+	while (len) {
+		unsigned long avail;
+		unsigned char *src = use_pack(p, w_curs, offset, &avail);
+
+		if (avail > len)
+			avail = len;
+		memcpy(dst, src, avail);
+		dst += avail;
+		offset += avail;
+		len -= avail;
+	}
+}
+
+/*
+ * Phase 1, under the object read lock: drill down the delta chain like
+ * unpack_entry() and copy each level's compressed bytes out. Returns 1
+ * when the whole chain was captured and 0 when the caller must fall
+ * back to unpack_entry(). A base found in the delta base cache is
+ * detached, exactly as unpack_entry() would; the caller either returns
+ * it into the cache or frees it.
+ */
+static int pack_chain_copy_out(struct packed_git *p, off_t obj_offset,
+			       struct pack_copyout *co)
+{
+	struct pack_window *w_curs = NULL;
+	off_t curpos = obj_offset;
+	int ret = 0;
+
+	co->nr = 0;
+	co->scratch_used = 0;
+	co->cached_base = NULL;
+
+	prepare_repo_settings(p->repo);
+	write_pack_access_log(p, obj_offset);
+
+	for (;;) {
+		struct delta_base_cache_entry *ent;
+		enum object_type type;
+		size_t size, zlen;
+		off_t entry_start = curpos, next_off, base_offset;
+		uint32_t pack_pos;
+
+		if (co->nr >= PACK_COPYOUT_MAX_LEVELS) {
+			trace2_counter_add(TRACE2_COUNTER_ID_PACK_COPYOUT_FALLBACK_GATE, 1);
+			goto out;
+		}
+
+		/* The caller already probed the cache for the outermost level. */
+		if (co->nr) {
+			ent = get_delta_base_cache_entry(p, curpos);
+			if (ent) {
+				co->type = ent->type;
+				co->cached_base = ent->data;
+				co->cached_size = ent->size;
+				co->cached_offset = curpos;
+				detach_delta_base_cache_entry(ent);
+				break;
+			}
+		}
+
+		if (offset_to_pack_pos(p, entry_start, &pack_pos) < 0)
+			goto bad;
+
+		if (do_check_packed_object_crc && p->index_version > 1 &&
+		    pack_crc_check_once(p, &w_curs, pack_pos, entry_start))
+			goto bad;
+
+		type = unpack_object_header(p, &w_curs, &curpos, &size);
+		if (type == OBJ_OFS_DELTA || type == OBJ_REF_DELTA) {
+			base_offset = get_delta_base(p, &w_curs, &curpos, type,
+						     entry_start);
+			if (!base_offset)
+				goto bad;
+		} else if (type == OBJ_COMMIT || type == OBJ_TREE ||
+			   type == OBJ_BLOB || type == OBJ_TAG) {
+			base_offset = 0;
+			co->type = type;
+		} else {
+			goto bad;
+		}
+
+		/*
+		 * curpos now sits on the compressed payload. Check the
+		 * extent while it is still an off_t: converting it to
+		 * size_t first would truncate on 32-bit systems.
+		 */
+		next_off = pack_pos_to_offset(p, pack_pos + 1);
+		if (next_off <= curpos)
+			goto bad;
+		if (next_off - curpos >
+		    (off_t)(PACK_COPYOUT_MAX_BYTES - co->scratch_used)) {
+			trace2_counter_add(TRACE2_COUNTER_ID_PACK_COPYOUT_FALLBACK_GATE, 1);
+			goto out;
+		}
+		zlen = next_off - curpos;
+
+		copy_pack_bytes(p, &w_curs, curpos, zlen,
+				co->scratch + co->scratch_used);
+		co->levels[co->nr].obj_offset = entry_start;
+		co->levels[co->nr].size = size;
+		co->levels[co->nr].zofs = co->scratch_used;
+		co->levels[co->nr].zlen = zlen;
+		co->scratch_used += zlen;
+		co->nr++;
+
+		if (!base_offset)
+			break;
+		curpos = base_offset;
+	}
+
+	ret = 1;
+	goto out;
+bad:
+	trace2_counter_add(TRACE2_COUNTER_ID_PACK_COPYOUT_FALLBACK_BAD, 1);
+out:
+	unuse_pack(&w_curs);
+	return ret;
+}
+
+static void *copyout_inflate(const unsigned char *zdata, size_t zlen,
+			     size_t size)
+{
+	git_zstream stream;
+	unsigned char *buffer;
+	int st;
+
+	buffer = xmallocz_gently(size);
+	if (!buffer)
+		return NULL;
+	memset(&stream, 0, sizeof(stream));
+	stream.next_in = (unsigned char *)zdata;
+	stream.avail_in = zlen;
+	stream.next_out = buffer;
+	stream.avail_out = size + 1;
+
+	git_inflate_init(&stream);
+	st = git_inflate(&stream, Z_FINISH);
+	git_inflate_end(&stream);
+	if (st != Z_STREAM_END || stream.total_out != size) {
+		free(buffer);
+		return NULL;
+	}
+	buffer[size] = '\0';
+	return buffer;
+}
+
+struct pack_copyout_insert {
+	off_t offset;
+	void *data;
+	size_t size;
+};
+
+/*
+ * Phase 2, without the lock: inflate every level from the private copy
+ * and apply the deltas up the chain. Each intermediate base is queued
+ * for insertion into the delta base cache, matching what
+ * unpack_entry() caches. Returns the outermost object's data, or NULL
+ * with the successfully rebuilt bases (including a detached cached
+ * base) still queued, so the caller can insert them and fall back.
+ */
+static void *pack_copyout_apply(struct pack_copyout *co,
+				struct pack_copyout_insert *inserts,
+				int *inserts_nr, size_t *sizep)
+{
+	void *base;
+	size_t base_size;
+	off_t base_offset;
+	int i;
+
+	*inserts_nr = 0;
+
+	i = co->nr - 1;
+	if (co->cached_base) {
+		base = co->cached_base;
+		base_size = co->cached_size;
+		base_offset = co->cached_offset;
+	} else {
+		base = copyout_inflate(co->scratch + co->levels[i].zofs,
+				       co->levels[i].zlen, co->levels[i].size);
+		if (!base)
+			return NULL;
+		base_size = co->levels[i].size;
+		base_offset = co->levels[i].obj_offset;
+		i--;
+	}
+
+	for (; i >= 0; i--) {
+		void *delta, *result;
+		size_t result_size;
+
+		delta = copyout_inflate(co->scratch + co->levels[i].zofs,
+					co->levels[i].zlen, co->levels[i].size);
+		if (delta) {
+			result = patch_delta(base, base_size, delta,
+					     co->levels[i].size, &result_size);
+			free(delta);
+		} else {
+			result = NULL;
+		}
+		if (!result) {
+			/*
+			 * Queue the base as well: unpack_entry() hands every
+			 * base it computed to the cache even when a later
+			 * level fails, and the fallback re-read wants them.
+			 */
+			inserts[(*inserts_nr)++] = (struct pack_copyout_insert){
+				.offset = base_offset,
+				.data = base,
+				.size = base_size,
+			};
+			return NULL;
+		}
+
+		inserts[(*inserts_nr)++] = (struct pack_copyout_insert){
+			.offset = base_offset,
+			.data = base,
+			.size = base_size,
+		};
+		base = result;
+		base_size = result_size;
+		base_offset = co->levels[i].obj_offset;
+	}
+
+	*sizep = base_size;
+	return base;
+}
+
+/*
+ * Phase 3, under the lock again: hand the intermediate bases to the
+ * delta base cache in one go. add_delta_base_cache() drops duplicates
+ * that a concurrent reader may have inserted meanwhile.
+ */
+static void delta_base_cache_insert_batch(struct packed_git *p,
+					  struct pack_copyout_insert *inserts,
+					  int nr, enum object_type type)
+{
+	obj_read_lock();
+	for (int i = 0; i < nr; i++)
+		add_delta_base_cache(p, inserts[i].offset, inserts[i].data,
+				     inserts[i].size,
+				     p->repo->settings.delta_base_cache_limit,
+				     type);
+	obj_read_unlock();
+}
+
+static void *packed_read_object_copyout(struct repository *r UNUSED,
+					struct packed_git *p,
+					off_t obj_offset,
+					enum object_type *type,
+					size_t *sizep)
+{
+	struct pack_copyout *co;
+	struct pack_copyout_insert inserts[PACK_COPYOUT_MAX_LEVELS];
+	struct delta_base_cache_entry *ent;
+	int inserts_nr, ok;
+	void *data;
+	size_t size;
+
+	/* allocated before taking the lock; the scratch buffer is large */
+	co = xmalloc(sizeof(*co));
+
+	obj_read_lock();
+	ent = get_delta_base_cache_entry(p, obj_offset);
+	if (ent) {
+		if (type)
+			*type = ent->type;
+		if (sizep)
+			*sizep = ent->size;
+		data = xmemdupz(ent->data, ent->size);
+		obj_read_unlock();
+		free(co);
+		return data;
+	}
+	ok = pack_chain_copy_out(p, obj_offset, co);
+	obj_read_unlock();
+
+	if (!ok) {
+		free(co);
+		return NULL;
+	}
+
+	data = pack_copyout_apply(co, inserts, &inserts_nr, &size);
+	if (!data) {
+		trace2_counter_add(TRACE2_COUNTER_ID_PACK_COPYOUT_FALLBACK_BAD, 1);
+		if (inserts_nr)
+			delta_base_cache_insert_batch(p, inserts, inserts_nr,
+						      co->type);
+		free(co);
+		return NULL;
+	}
+
+	trace2_counter_add(TRACE2_COUNTER_ID_PACK_COPYOUT_TAKEN, 1);
+	trace2_counter_add(TRACE2_COUNTER_ID_PACK_COPYOUT_BYTES,
+			   co->scratch_used);
+
+	if (inserts_nr)
+		delta_base_cache_insert_batch(p, inserts, inserts_nr, co->type);
+
+	if (type)
+		*type = co->type;
+	if (sizep)
+		*sizep = size;
+	free(co);
 	return data;
 }
 

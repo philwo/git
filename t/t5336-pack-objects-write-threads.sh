@@ -31,6 +31,17 @@ test_expect_success 'parallel write phase reuses pack data identically' '
 	test_cmp reuse1-$(cat name3).pack reuse2-$(cat name4).pack
 '
 
+# The copy-out read path must hand out the same object bytes as the
+# plain unpack_entry() read path.
+test_expect_success 'copy-out reads produce an identical pack' '
+	GIT_TEST_PACK_COPYOUT=0 git -c pack.threads=1 -c pack.writeThreads=1 \
+		pack-objects --all --no-reuse-object plain </dev/null >name5 &&
+	GIT_TEST_PACK_COPYOUT=1 git -c pack.threads=1 -c pack.writeThreads=1 \
+		pack-objects --all --no-reuse-object copyout </dev/null >name6 &&
+	test_cmp name5 name6 &&
+	test_cmp plain-$(cat name5).pack copyout-$(cat name6).pack
+'
+
 # Byte identity alone also holds when the option is silently ignored;
 # check via trace2 that the parallel writer ran and its workers
 # prepared at least one entry.

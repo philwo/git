@@ -474,6 +474,13 @@ void *unpack_entry(struct repository *r, struct packed_git *, off_t,
 void *packed_read_object(struct repository *r, struct packed_git *p,
 			 off_t obj_offset, enum object_type *type,
 			 size_t *sizep);
+
+/*
+ * Latch the GIT_TEST_PACK_COPYOUT override. enable_obj_read_lock()
+ * calls this before any reader thread exists, so later lock-free
+ * reads of the latched value never race.
+ */
+void pack_copyout_read_env(void);
 unsigned long unpack_object_header_buffer(const unsigned char *buf, unsigned long len, enum object_type *type, size_t *sizep);
 size_t get_size_from_delta(struct packed_git *, struct pack_window **, off_t);
 int unpack_object_header(struct packed_git *, struct pack_window **, off_t *, size_t *);
