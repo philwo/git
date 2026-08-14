@@ -76,6 +76,16 @@ struct path_walk_info {
 	int edge_aggressive;
 
 	/**
+	 * When 'full_boundary_walk' is set, mark the uninteresting boundary
+	 * with a full recursive walk of each boundary tree even when
+	 * 'prune_all_uninteresting' would pick the sparse tree walk. The
+	 * full walk parses each boundary tree only once and marks the
+	 * complete closure, which packs a range tighter; the sparse walk
+	 * stays cheap for small ranges over large trees.
+	 */
+	int full_boundary_walk;
+
+	/**
 	 * Specify a sparse-checkout definition to match our paths to. Do not
 	 * walk outside of this sparse definition. If the patterns are in
 	 * cone mode, then the search may prune directories that are outside
