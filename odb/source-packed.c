@@ -141,8 +141,13 @@ static int odb_source_packed_read_object_stream(struct odb_stream **out,
 {
 	struct odb_source_packed *packed = odb_source_packed_downcast(source);
 	struct pack_entry e;
+	int found;
 
-	if (!find_pack_entry(packed, oid, &e, 0, NULL))
+	/* find_pack_entry() reorders the pack MRU list. */
+	obj_read_lock();
+	found = find_pack_entry(packed, oid, &e, 0, NULL);
+	obj_read_unlock();
+	if (!found)
 		return -1;
 
 	return packfile_read_object_stream(out, oid, e.p, e.offset);

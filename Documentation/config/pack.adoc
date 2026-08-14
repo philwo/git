@@ -82,6 +82,16 @@ pack.threads::
 	Specifying 0 will cause Git to auto-detect the number of CPUs
 	and set the number of threads accordingly.
 
+pack.writeThreads::
+	Specifies the number of threads to spawn when compressing objects
+	while writing the resulting pack. This requires that
+	linkgit:git-pack-objects[1] be compiled with pthreads otherwise
+	this option is ignored with a warning. Specifying 0 (the default)
+	uses the same number of threads as `pack.threads` when writing a
+	pack to disk, and a single thread when writing to stdout (for
+	example when serving a fetch), so that a server does not multiply
+	its thread and memory use per connection.
+
 pack.indexVersion::
 	Specify the default pack index version.  Valid values are 1 for
 	legacy pack index used by Git versions prior to 1.5.2, and 2 for

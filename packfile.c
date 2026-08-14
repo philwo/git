@@ -2155,11 +2155,17 @@ static ssize_t read_istream_pack_non_delta(struct odb_stream *_st, char *buf,
 		break;
 	}
 
+	/*
+	 * pack-objects streams large blobs from its writer thread while
+	 * write-prep workers grow and evict pack windows under the
+	 * object read lock, so hold it around each window use.
+	 */
 	while (total_read < sz) {
 		int status;
 		struct pack_window *window = NULL;
 		unsigned char *mapped;
 
+		obj_read_lock();
 		mapped = use_pack(st->pack, &window,
 				  st->pos, &st->z.avail_in);
 
@@ -2171,6 +2177,7 @@ static ssize_t read_istream_pack_non_delta(struct odb_stream *_st, char *buf,
 		st->pos += st->z.next_in - mapped;
 		total_read = st->z.next_out - (unsigned char *)buf;
 		unuse_pack(&window);
+		obj_read_unlock();
 
 		if (status == Z_STREAM_END) {
 			git_inflate_end(&st->z);
@@ -2213,8 +2220,10 @@ int packfile_read_object_stream(struct odb_stream **out,
 	enum object_type in_pack_type;
 	size_t size;
 
+	obj_read_lock();
 	in_pack_type = unpack_object_header(pack, &window, &offset, &size);
 	unuse_pack(&window);
+	obj_read_unlock();
 
 	if (repo_settings_get_big_file_threshold(pack->repo) >= size)
 		return -1;
