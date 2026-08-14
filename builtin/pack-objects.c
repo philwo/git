@@ -483,6 +483,12 @@ struct write_prep_slot {
 
 #define WRITE_PREP_RING_SIZE 2048
 #define WRITE_PREP_BUDGET ((size_t)256 << 20)
+/*
+ * How many slots the writer frees before it wakes a claim waiter.
+ * Most entries need no preparation, so waking a worker for every
+ * consumed entry only burns signal and context-switch time.
+ */
+#define WRITE_PREP_WAKE_BATCH (WRITE_PREP_RING_SIZE / 32)
 
 static struct {
 	struct object_entry **order;
@@ -493,6 +499,7 @@ static struct {
 	pthread_cond_t ready;		/* a slot became READY */
 	uint32_t next_claim;		/* next order index a worker may take */
 	uint32_t writer_pos;		/* first order index not yet written */
+	uint32_t slots_freed;		/* consumed since the last can_claim wake */
 	size_t inflight;		/* payload bytes prepared but not yet written */
 	int nr_claim_waiters;		/* workers blocked in can_claim */
 	int writer_waiting;		/* writer blocked in ready */
@@ -628,6 +635,16 @@ static void *write_prep_thread(void *arg UNUSED)
 			continue;
 		slot->accounted = est;
 		wprep.inflight += est;
+		/*
+		 * Pass the baton before producing: the writer wakes only one
+		 * worker per freed batch, so chain to the next waiter while
+		 * there is still room to claim.
+		 */
+		if (wprep.nr_claim_waiters &&
+		    wprep.next_claim < wprep.nr &&
+		    wprep.next_claim < wprep.writer_pos + WRITE_PREP_RING_SIZE &&
+		    wprep.inflight < WRITE_PREP_BUDGET)
+			pthread_cond_signal(&wprep.can_claim);
 		pthread_mutex_unlock(&wprep.mutex);
 
 		memset(&local, 0, sizeof(local));
@@ -661,6 +678,11 @@ static int write_prep_take(uint32_t i, struct write_prep_slot *out)
 	pthread_mutex_lock(&wprep.mutex);
 	slot = &wprep.ring[i % WRITE_PREP_RING_SIZE];
 	while (slot->state == WRITE_PREP_BUSY) {
+		/* Do not sit on freed slots while sleeping. */
+		if (wprep.nr_claim_waiters && wprep.slots_freed) {
+			wprep.slots_freed = 0;
+			pthread_cond_signal(&wprep.can_claim);
+		}
 		wprep.writer_waiting = 1;
 		pthread_cond_wait(&wprep.ready, &wprep.mutex);
 		wprep.writer_waiting = 0;
@@ -683,8 +705,11 @@ static int write_prep_take(uint32_t i, struct write_prep_slot *out)
 	slot->buf = NULL;
 	slot->accounted = 0;
 	wprep.writer_pos = i + 1;
-	if (wprep.nr_claim_waiters)
+	if (wprep.nr_claim_waiters &&
+	    ++wprep.slots_freed >= WRITE_PREP_WAKE_BATCH) {
+		wprep.slots_freed = 0;
 		pthread_cond_signal(&wprep.can_claim);
+	}
 	pthread_mutex_unlock(&wprep.mutex);
 	return ready;
 }
