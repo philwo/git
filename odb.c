@@ -14,6 +14,7 @@
 #include "object-name.h"
 #include "odb.h"
 #include "odb/source-inmemory.h"
+#include "packfile.h"
 #include "path.h"
 #include "promisor-remote.h"
 #include "quote.h"
@@ -548,6 +549,7 @@ void enable_obj_read_lock(void)
 	if (obj_read_use_lock)
 		return;
 
+	pack_copyout_read_env();
 	obj_read_use_lock = 1;
 	init_recursive_mutex(&obj_read_mutex);
 }

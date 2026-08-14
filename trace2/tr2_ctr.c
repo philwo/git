@@ -46,6 +46,26 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.name = "hardware-flush",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_COUNTER_ID_PACK_COPYOUT_TAKEN] = {
+		.category = "pack-copyout",
+		.name = "taken",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_PACK_COPYOUT_BYTES] = {
+		.category = "pack-copyout",
+		.name = "bytes",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_PACK_COPYOUT_FALLBACK_GATE] = {
+		.category = "pack-copyout",
+		.name = "fallback-gate",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_PACK_COPYOUT_FALLBACK_BAD] = {
+		.category = "pack-copyout",
+		.name = "fallback-bad",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };
