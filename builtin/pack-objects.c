@@ -2782,12 +2782,11 @@ size_t oe_get_size_slow(struct packing_data *pack,
 
 	if (e->type_ != OBJ_OFS_DELTA && e->type_ != OBJ_REF_DELTA) {
 		size_t sz;
-		packing_data_lock(&to_pack);
+		/* odb_read_object_info() does its own locking. */
 		if (odb_read_object_info(the_repository->objects,
 					 &e->idx.oid, &sz) < 0)
 			die(_("unable to get size of %s"),
 			    oid_to_hex(&e->idx.oid));
-		packing_data_unlock(&to_pack);
 		return sz;
 	}
 
@@ -2795,7 +2794,8 @@ size_t oe_get_size_slow(struct packing_data *pack,
 	if (!p)
 		BUG("when e->type is a delta, it must belong to a pack");
 
-	packing_data_lock(&to_pack);
+	/* Walking the pack windows directly needs the object read lock. */
+	obj_read_lock();
 	w_curs = NULL;
 	buf = use_pack(p, &w_curs, e->in_pack_offset, &avail);
 	used = unpack_object_header_buffer(buf, avail, &type, &size);
@@ -2804,7 +2804,7 @@ size_t oe_get_size_slow(struct packing_data *pack,
 		    oid_to_hex(&e->idx.oid));
 
 	unuse_pack(&w_curs);
-	packing_data_unlock(&to_pack);
+	obj_read_unlock();
 	return size;
 }
 
@@ -2867,12 +2867,11 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 	/* Load data if not already done */
 	if (!trg->data) {
 		size_t sz_st = 0;
-		packing_data_lock(&to_pack);
+		/* odb_read_object() does its own locking. */
 		trg->data = odb_read_object(the_repository->objects,
 					    &trg_entry->idx.oid, &type,
 					    &sz_st);
 		sz = cast_size_t_to_ulong(sz_st);
-		packing_data_unlock(&to_pack);
 		if (!trg->data)
 			die(_("object %s cannot be read"),
 			    oid_to_hex(&trg_entry->idx.oid));
@@ -2884,12 +2883,11 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 	}
 	if (!src->data) {
 		size_t sz_st = 0;
-		packing_data_lock(&to_pack);
+		/* odb_read_object() does its own locking. */
 		src->data = odb_read_object(the_repository->objects,
 					    &src_entry->idx.oid, &type,
 					    &sz_st);
 		sz = cast_size_t_to_ulong(sz_st);
-		packing_data_unlock(&to_pack);
 		if (!src->data) {
 			if (src_entry->preferred_base) {
 				static int warned = 0;
@@ -3174,10 +3172,16 @@ static void init_threaded_search(void)
 	pthread_mutex_init(&cache_mutex, NULL);
 	pthread_mutex_init(&progress_mutex, NULL);
 	pthread_cond_init(&progress_cond, NULL);
+	/*
+	 * Let the object database do its own locking. It releases the lock
+	 * around zlib inflation, so several threads can inflate at once.
+	 */
+	enable_obj_read_lock();
 }
 
 static void cleanup_threaded_search(void)
 {
+	disable_obj_read_lock();
 	pthread_cond_destroy(&progress_cond);
 	pthread_mutex_destroy(&cache_mutex);
 	pthread_mutex_destroy(&progress_mutex);
