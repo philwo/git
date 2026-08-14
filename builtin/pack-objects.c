@@ -3474,45 +3474,49 @@ static void find_deltas_by_region(struct object_entry *list,
 	stop_progress(&progress_state);
 }
 
+/*
+ * Regions are handed out from one shared cursor rather than split up front,
+ * because their sizes differ by orders of magnitude and a region is never
+ * split across threads. A thread takes the next region as soon as it is free,
+ * so a thread that draws a huge region does not leave the others idle.
+ * Protected by progress_mutex, and taken once per region, which is nothing
+ * next to the delta search for that region.
+ */
+static size_t region_cursor;
+static size_t region_cursor_end;
+
 static void *threaded_find_deltas_by_path(void *arg)
 {
 	struct thread_params *me = arg;
 
-	progress_lock();
-	while (me->remaining) {
-		while (me->remaining) {
-			progress_unlock();
-			find_deltas_for_region(to_pack.objects,
-					       me->regions,
-					       me->processed);
-			progress_lock();
-			me->remaining--;
-			me->regions++;
-		}
-
-		me->working = 0;
-		pthread_cond_signal(&progress_cond);
-		progress_unlock();
-
-		/*
-		 * We must not set ->data_ready before we wait on the
-		 * condition because the main thread may have set it to 1
-		 * before we get here. In order to be sure that new
-		 * work is available if we see 1 in ->data_ready, it
-		 * was initialized to 0 before this thread was spawned
-		 * and we reset it to 0 right away.
-		 */
-		pthread_mutex_lock(&me->mutex);
-		while (!me->data_ready)
-			pthread_cond_wait(&me->cond, &me->mutex);
-		me->data_ready = 0;
-		pthread_mutex_unlock(&me->mutex);
+	for (;;) {
+		struct packing_region *region;
 
 		progress_lock();
+		if (region_cursor >= region_cursor_end) {
+			progress_unlock();
+			break;
+		}
+		region = &me->regions[region_cursor++];
+		progress_unlock();
+
+		find_deltas_for_region(to_pack.objects, region, me->processed);
 	}
-	progress_unlock();
-	/* leave ->working 1 so that this doesn't get more work assigned */
+
 	return NULL;
+}
+
+/* Order regions so that the ones with the most objects come first. */
+static int region_nr_desc(const void *a_, const void *b_)
+{
+	const struct packing_region *a = a_;
+	const struct packing_region *b = b_;
+
+	if (a->nr > b->nr)
+		return -1;
+	if (a->nr < b->nr)
+		return 1;
+	return 0;
 }
 
 static void ll_find_deltas_by_region(struct object_entry *list,
@@ -3541,36 +3545,29 @@ static void ll_find_deltas_by_region(struct object_entry *list,
 			      "Path-based delta compression using up to %d threads",
 			      delta_search_threads),
 			   delta_search_threads);
+	/*
+	 * Region sizes span orders of magnitude: a path touched by every
+	 * commit lands in the same array as one touched twice. Hand the
+	 * largest out first so the small ones fill in the tail.
+	 */
+	QSORT(regions + start, nr, region_nr_desc);
+
 	CALLOC_ARRAY(p, delta_search_threads);
 
 	if (progress)
 		progress_state = start_progress(the_repository,
 						_("Compressing objects by path"),
 						progress_nr);
-	/* Partition the work amongst work threads. */
-	for (i = 0; i < delta_search_threads; i++) {
-		unsigned sub_size = nr / (delta_search_threads - i);
 
+	region_cursor = start;
+	region_cursor_end = start + nr;
+
+	for (i = 0; i < delta_search_threads; i++) {
 		p[i].window = window;
 		p[i].depth = depth;
 		p[i].processed = &processed;
-		p[i].working = 1;
-		p[i].data_ready = 0;
-
 		p[i].regions = regions;
-		p[i].list_size = sub_size;
-		p[i].remaining = sub_size;
 
-		regions += sub_size;
-		nr -= sub_size;
-	}
-
-	/* Start work threads. */
-	for (i = 0; i < delta_search_threads; i++) {
-		if (!p[i].list_size)
-			continue;
-		pthread_mutex_init(&p[i].mutex, NULL);
-		pthread_cond_init(&p[i].cond, NULL);
 		ret = pthread_create(&p[i].thread, NULL,
 				     threaded_find_deltas_by_path, &p[i]);
 		if (ret)
@@ -3578,55 +3575,9 @@ static void ll_find_deltas_by_region(struct object_entry *list,
 		active_threads++;
 	}
 
-	/*
-	 * Now let's wait for work completion.  Each time a thread is done
-	 * with its work, we steal half of the remaining work from the
-	 * thread with the largest number of unprocessed objects and give
-	 * it to that newly idle thread.  This ensure good load balancing
-	 * until the remaining object list segments are simply too short
-	 * to be worth splitting anymore.
-	 */
+	/* Each thread runs until the shared cursor is exhausted. */
 	while (active_threads) {
-		struct thread_params *target = NULL;
-		struct thread_params *victim = NULL;
-		unsigned sub_size = 0;
-
-		progress_lock();
-		for (;;) {
-			for (i = 0; !target && i < delta_search_threads; i++)
-				if (!p[i].working)
-					target = &p[i];
-			if (target)
-				break;
-			pthread_cond_wait(&progress_cond, &progress_mutex);
-		}
-
-		for (i = 0; i < delta_search_threads; i++)
-			if (p[i].remaining > 2*window &&
-			    (!victim || victim->remaining < p[i].remaining))
-				victim = &p[i];
-		if (victim) {
-			sub_size = victim->remaining / 2;
-			target->regions = victim->regions + victim->remaining - sub_size;
-			victim->list_size -= sub_size;
-			victim->remaining -= sub_size;
-		}
-		target->list_size = sub_size;
-		target->remaining = sub_size;
-		target->working = 1;
-		progress_unlock();
-
-		pthread_mutex_lock(&target->mutex);
-		target->data_ready = 1;
-		pthread_cond_signal(&target->cond);
-		pthread_mutex_unlock(&target->mutex);
-
-		if (!sub_size) {
-			pthread_join(target->thread, NULL);
-			pthread_cond_destroy(&target->cond);
-			pthread_mutex_destroy(&target->mutex);
-			active_threads--;
-		}
+		pthread_join(p[--active_threads].thread, NULL);
 	}
 	cleanup_threaded_search();
 	free(p);
