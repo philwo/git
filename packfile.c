@@ -1969,8 +1969,15 @@ void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
 			      (uintmax_t)curpos, p->pack_name);
 			data = NULL;
 		} else {
+			/*
+			 * The base and delta buffers are private to this
+			 * thread, so the delta can be applied without
+			 * holding the object read lock.
+			 */
+			obj_read_unlock();
 			data = patch_delta(base, base_size, delta_data,
 					   delta_size, &size);
+			obj_read_lock();
 
 			/*
 			 * We could not apply the delta; warn the user, but
