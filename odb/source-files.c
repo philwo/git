@@ -415,10 +415,11 @@ static uint64_t total_ram(void)
 static uint64_t estimate_repack_memory(struct odb_source_files *files,
 				       struct packed_git *pack)
 {
-	unsigned long max_delta_cache_size = DEFAULT_DELTA_CACHE_SIZE;
+	size_t max_delta_cache_size = DEFAULT_DELTA_CACHE_SIZE;
 	unsigned long delta_base_cache_limit = DEFAULT_DELTA_BASE_CACHE_LIMIT;
 	unsigned long nr_objects;
 	size_t os_cache, heap;
+	const char *value;
 
 	if (odb_source_count_objects(&files->base, ODB_COUNT_OBJECTS_APPROXIMATE,
 				     &nr_objects) < 0)
@@ -427,8 +428,18 @@ static uint64_t estimate_repack_memory(struct odb_source_files *files,
 	if (!pack || !nr_objects)
 		return 0;
 
-	repo_config_get_ulong(files->base.odb->repo, "pack.deltacachesize",
-			      &max_delta_cache_size);
+	/*
+	 * A size_t read keeps values past 4 GiB working on platforms
+	 * where unsigned long has 32 bits.
+	 */
+	if (!repo_config_get_value(files->base.odb->repo, "pack.deltacachesize",
+				   &value)) {
+		ssize_t size;
+
+		if (value && git_parse_ssize_t(value, &size) && size > 0)
+			max_delta_cache_size = size;
+	}
+
 	repo_config_get_ulong(files->base.odb->repo, "core.deltabasecachelimit",
 			      &delta_base_cache_limit);
 
