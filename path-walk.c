@@ -143,14 +143,184 @@ static struct type_and_oid_list *add_path_to_list(struct path_walk_context *ctx,
 	return list;
 }
 
+/*
+ * The decoded entries of one expanded tree, kept as the skip anchor
+ * while later versions of the same path are expanded. The tree buffer
+ * stays allocated because the entries point into it.
+ */
+struct expanded_tree {
+	struct tree *tree;
+	struct name_entry *entries;
+	size_t nr, alloc;
+};
+
+static void expanded_tree_release(struct expanded_tree *ex)
+{
+	if (ex->tree)
+		free_tree_buffer(ex->tree);
+	ex->tree = NULL;
+	FREE_AND_NULL(ex->entries);
+	ex->nr = ex->alloc = 0;
+}
+
+static int tree_entry_identical(const struct name_entry *a,
+				const struct name_entry *b)
+{
+	return a->pathlen == b->pathlen && a->mode == b->mode &&
+	       !memcmp(a->path, b->path, a->pathlen) &&
+	       oideq(&a->oid, &b->oid);
+}
+
+static int process_tree_entry(struct path_walk_context *ctx,
+			      struct strbuf *path,
+			      size_t base_len,
+			      struct name_entry *entry)
+{
+	struct object *o;
+	struct type_and_oid_list *list;
+	/* Not actually true, but we will ignore submodules later. */
+	enum object_type type = S_ISDIR(entry->mode) ? OBJ_TREE : OBJ_BLOB;
+
+	/* Skip submodules. */
+	if (S_ISGITLINK(entry->mode))
+		return 0;
+
+	/* If the caller doesn't want blobs, then don't bother. */
+	if (!ctx->info->blobs && type == OBJ_BLOB)
+		return 0;
+
+	if (type == OBJ_TREE) {
+		struct tree *child = lookup_tree(ctx->repo, &entry->oid);
+		o = child ? &child->object : NULL;
+	} else if (type == OBJ_BLOB) {
+		struct blob *child = lookup_blob(ctx->repo, &entry->oid);
+		o = child ? &child->object : NULL;
+	} else {
+		BUG("invalid type for tree entry: %d", type);
+	}
+
+	if (!o) {
+		error(_("failed to find object %s"),
+		      oid_to_hex(&entry->oid));
+		return -1;
+	}
+
+	strbuf_setlen(path, base_len);
+	strbuf_add(path, entry->path, entry->pathlen);
+
+	/*
+	 * Trees will end with "/" for concatenation and distinction
+	 * from blobs at the same path.
+	 */
+	if (type == OBJ_TREE)
+		strbuf_addch(path, '/');
+
+	if (o->flags & SEEN) {
+		/*
+		 * A tree with a shared OID may appear at multiple
+		 * paths. Even though we already added this tree to
+		 * the output at some other path, we still need to
+		 * walk into it at this in-cone path to discover
+		 * blobs that were not found at the earlier
+		 * out-of-cone path.
+		 *
+		 * Only do this for paths not yet in our map, to
+		 * avoid duplicate entries when the same tree OID
+		 * appears at the same path across multiple commits.
+		 */
+		if (type == OBJ_TREE && ctx->info->pl &&
+		    ctx->info->pl->use_cone_patterns &&
+		    !ctx->info->pl_sparse_trees &&
+		    !strmap_contains(&ctx->paths_to_lists, path->buf)) {
+			int dtype;
+			enum pattern_match_result m;
+			m = path_matches_pattern_list(path->buf, path->len,
+						      path->buf + base_len,
+						      &dtype,
+						      ctx->info->pl,
+						      ctx->repo->index);
+			if (m != NOT_MATCHED) {
+				list = add_path_to_list(ctx, path->buf,
+							type, &entry->oid,
+							!(o->flags & UNINTERESTING));
+				push_to_stack(ctx, path->buf, list);
+			}
+		}
+		return 0;
+	}
+
+	if (ctx->info->pl) {
+		int dtype;
+		enum pattern_match_result match;
+		match = path_matches_pattern_list(path->buf, path->len,
+						  path->buf + base_len, &dtype,
+						  ctx->info->pl,
+						  ctx->repo->index);
+
+		if (ctx->info->pl->use_cone_patterns &&
+		    match == NOT_MATCHED &&
+		    (type == OBJ_BLOB || ctx->info->pl_sparse_trees))
+			return 0;
+		else if (!ctx->info->pl->use_cone_patterns &&
+			 type == OBJ_BLOB &&
+			 match != MATCHED)
+			return 0;
+	}
+	if (ctx->revs->prune_data.nr && ctx->exact_pathspecs) {
+		struct pathspec *pd = &ctx->revs->prune_data;
+		bool found = false;
+		int did_strip_suffix = strbuf_strip_suffix(path, "/");
+
+
+		for (int i = 0; i < pd->nr; i++) {
+			struct pathspec_item *item = &pd->items[i];
+
+			/*
+			 * Continue if either is a directory prefix
+			 * of the other.
+			 */
+			if (dir_prefix(path->buf, item->match) ||
+			    dir_prefix(item->match, path->buf)) {
+				found = true;
+				break;
+			}
+		}
+
+		if (did_strip_suffix)
+			strbuf_addch(path, '/');
+
+		/* Skip paths that do not match the prefix. */
+		if (!found)
+			return 0;
+	}
+
+	o->flags |= SEEN;
+	list = add_path_to_list(ctx, path->buf, type, &entry->oid,
+				!(o->flags & UNINTERESTING));
+
+	push_to_stack(ctx, path->buf, list);
+	return 0;
+}
+
+/*
+ * Expand one version of the tree at base_path: add each child to the
+ * list of the path it lives at and queue newly seen paths. prev holds
+ * the previously expanded version of the same path and acts as the
+ * skip anchor: entries identical to one in it were already handled
+ * when that version was expanded, so a merge walk of the two sorted
+ * entry lists skips them without any lookups. On success the entries
+ * read here become the anchor for the next version.
+ */
 static int add_tree_entries(struct path_walk_context *ctx,
 			    const char *base_path,
-			    struct object_id *oid)
+			    struct object_id *oid,
+			    struct expanded_tree *prev,
+			    struct expanded_tree *cur)
 {
 	struct tree_desc desc;
 	struct name_entry entry;
 	struct strbuf path = STRBUF_INIT;
-	size_t base_len;
+	size_t base_len, j = 0;
 	struct tree *tree = lookup_tree(ctx->repo, oid);
 
 	if (!tree) {
@@ -162,138 +332,60 @@ static int add_tree_entries(struct path_walk_context *ctx,
 		return -1;
 	}
 
+	cur->tree = tree;
+	cur->nr = 0;
+	init_tree_desc(&desc, &tree->object.oid, tree->buffer, tree->size);
+	while (tree_entry(&desc, &entry)) {
+		ALLOC_GROW(cur->entries, cur->nr + 1, cur->alloc);
+		cur->entries[cur->nr++] = entry;
+	}
+
 	strbuf_addstr(&path, base_path);
 	base_len = path.len;
 
-	init_tree_desc(&desc, &tree->object.oid, tree->buffer, tree->size);
-	while (tree_entry(&desc, &entry)) {
-		struct object *o;
-		struct type_and_oid_list *list;
-		/* Not actually true, but we will ignore submodules later. */
-		enum object_type type = S_ISDIR(entry.mode) ? OBJ_TREE : OBJ_BLOB;
-
-		/* Skip submodules. */
-		if (S_ISGITLINK(entry.mode))
-			continue;
-
-		/* If the caller doesn't want blobs, then don't bother. */
-		if (!ctx->info->blobs && type == OBJ_BLOB)
-			continue;
-
-		if (type == OBJ_TREE) {
-			struct tree *child = lookup_tree(ctx->repo, &entry.oid);
-			o = child ? &child->object : NULL;
-		} else if (type == OBJ_BLOB) {
-			struct blob *child = lookup_blob(ctx->repo, &entry.oid);
-			o = child ? &child->object : NULL;
-		} else {
-			BUG("invalid type for tree entry: %d", type);
-		}
-
-		if (!o) {
-			error(_("failed to find object %s"),
-			      oid_to_hex(&entry.oid));
-			return -1;
-		}
-
-		strbuf_setlen(&path, base_len);
-		strbuf_add(&path, entry.path, entry.pathlen);
+	for (size_t i = 0; i < cur->nr; i++) {
+		struct name_entry *e = &cur->entries[i];
 
 		/*
-		 * Trees will end with "/" for concatenation and distinction
-		 * from blobs at the same path.
+		 * Versions mostly align entry for entry, so test the
+		 * aligned anchor entry first and only fall back to the
+		 * ordered advance on a mismatch. With a pattern list,
+		 * whether an entry is expanded depends on more state than
+		 * the entry itself, so process everything.
 		 */
-		if (type == OBJ_TREE)
-			strbuf_addch(&path, '/');
-
-		if (o->flags & SEEN) {
-			/*
-			 * A tree with a shared OID may appear at multiple
-			 * paths. Even though we already added this tree to
-			 * the output at some other path, we still need to
-			 * walk into it at this in-cone path to discover
-			 * blobs that were not found at the earlier
-			 * out-of-cone path.
-			 *
-			 * Only do this for paths not yet in our map, to
-			 * avoid duplicate entries when the same tree OID
-			 * appears at the same path across multiple commits.
-			 */
-			if (type == OBJ_TREE && ctx->info->pl &&
-			    ctx->info->pl->use_cone_patterns &&
-			    !ctx->info->pl_sparse_trees &&
-			    !strmap_contains(&ctx->paths_to_lists, path.buf)) {
-				int dtype;
-				enum pattern_match_result m;
-				m = path_matches_pattern_list(path.buf, path.len,
-							      path.buf + base_len,
-							      &dtype,
-							      ctx->info->pl,
-							      ctx->repo->index);
-				if (m != NOT_MATCHED) {
-					list = add_path_to_list(ctx, path.buf,
-								type, &entry.oid,
-								!(o->flags & UNINTERESTING));
-					push_to_stack(ctx, path.buf, list);
-				}
+		if (!ctx->info->pl && j < prev->nr) {
+			if (tree_entry_identical(&prev->entries[j], e)) {
+				j++;
+				continue;
 			}
-			continue;
-		}
-
-		if (ctx->info->pl) {
-			int dtype;
-			enum pattern_match_result match;
-			match = path_matches_pattern_list(path.buf, path.len,
-							  path.buf + base_len, &dtype,
-							  ctx->info->pl,
-							  ctx->repo->index);
-
-			if (ctx->info->pl->use_cone_patterns &&
-			    match == NOT_MATCHED &&
-			    (type == OBJ_BLOB || ctx->info->pl_sparse_trees))
+			while (j < prev->nr &&
+			       base_name_compare(prev->entries[j].path,
+						 prev->entries[j].pathlen,
+						 prev->entries[j].mode,
+						 e->path, e->pathlen,
+						 e->mode) < 0)
+				j++;
+			if (j < prev->nr &&
+			    tree_entry_identical(&prev->entries[j], e)) {
+				j++;
 				continue;
-			else if (!ctx->info->pl->use_cone_patterns &&
-				 type == OBJ_BLOB &&
-				 match != MATCHED)
-				continue;
-		}
-		if (ctx->revs->prune_data.nr && ctx->exact_pathspecs) {
-			struct pathspec *pd = &ctx->revs->prune_data;
-			bool found = false;
-			int did_strip_suffix = strbuf_strip_suffix(&path, "/");
-
-
-			for (int i = 0; i < pd->nr; i++) {
-				struct pathspec_item *item = &pd->items[i];
-
-				/*
-				 * Continue if either is a directory prefix
-				 * of the other.
-				 */
-				if (dir_prefix(path.buf, item->match) ||
-				    dir_prefix(item->match, path.buf)) {
-					found = true;
-					break;
-				}
 			}
-
-			if (did_strip_suffix)
-				strbuf_addch(&path, '/');
-
-			/* Skip paths that do not match the prefix. */
-			if (!found)
-				continue;
 		}
 
-		o->flags |= SEEN;
-		list = add_path_to_list(ctx, path.buf, type, &entry.oid,
-					!(o->flags & UNINTERESTING));
-
-		push_to_stack(ctx, path.buf, list);
+		if (process_tree_entry(ctx, &path, base_len, e) < 0) {
+			strbuf_release(&path);
+			free_tree_buffer(cur->tree);
+			cur->tree = NULL;
+			return -1;
+		}
 	}
 
-	free_tree_buffer(tree);
 	strbuf_release(&path);
+	if (prev->tree) {
+		free_tree_buffer(prev->tree);
+		prev->tree = NULL;
+	}
+	SWAP(*prev, *cur);
 	return 0;
 }
 
@@ -414,11 +506,16 @@ static int walk_path(struct path_walk_context *ctx,
 		/* Use root path if expanding from tagged/direct trees. */
 		const char *expand_path = !strcmp(path, "/tagged-trees")
 					  ? root_path : path;
+		struct expanded_tree prev = { 0 }, cur = { 0 };
+
 		for (size_t i = 0; i < list->oids.nr; i++) {
 			ret |= add_tree_entries(ctx,
 					    expand_path,
-					    &list->oids.oid[i]);
+					    &list->oids.oid[i],
+					    &prev, &cur);
 		}
+		expanded_tree_release(&prev);
+		expanded_tree_release(&cur);
 	}
 
 	oid_array_clear(&list->oids);
