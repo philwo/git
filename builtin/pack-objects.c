@@ -5357,6 +5357,32 @@ static int add_objects_by_path(const char *path,
 	return 0;
 }
 
+/*
+ * Serve a tree read for the path walk from the pack location that
+ * add_objects_by_path() recorded for the same oid moments earlier,
+ * skipping the oid lookup a plain object database read would redo.
+ * Returning NULL makes the walk read from the object database instead.
+ */
+static void *tree_content_at_known_offset(const struct object_id *oid,
+					  size_t *size, void *data UNUSED)
+{
+	struct object_entry *entry = packlist_find(&to_pack, oid);
+	struct packed_git *p;
+	enum object_type type;
+	void *content;
+
+	if (!entry || !(p = IN_PACK(entry)))
+		return NULL;
+
+	content = packed_read_object(the_repository, p, entry->in_pack_offset,
+				     &type, size);
+	if (content && type != OBJ_TREE) {
+		free(content);
+		return NULL;
+	}
+	return content;
+}
+
 static int get_object_list_path_walk(struct rev_info *revs)
 {
 	struct path_walk_info info = PATH_WALK_INFO_INIT;
@@ -5366,6 +5392,7 @@ static int get_object_list_path_walk(struct rev_info *revs)
 	info.revs = revs;
 	info.path_fn = add_objects_by_path;
 	info.path_fn_data = &processed;
+	info.tree_content_fn = tree_content_at_known_offset;
 
 	/*
 	 * Allow the --[no-]sparse option to be interesting here, if only
