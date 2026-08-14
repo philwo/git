@@ -383,7 +383,22 @@ static int add_tree_entries(struct path_walk_context *ctx,
 		error(_("failed to walk children of tree %s: not found"),
 		      oid_to_hex(oid));
 		return -1;
-	} else if (repo_parse_tree_gently(ctx->repo, tree, 1)) {
+	}
+
+	/*
+	 * An already-parsed tree keeps its buffer: parse_tree_buffer()
+	 * would not take ownership of a second one.
+	 */
+	if (!tree->object.parsed && ctx->info->tree_content_fn) {
+		size_t size;
+		void *content = ctx->info->tree_content_fn(oid, &size,
+					ctx->info->tree_content_fn_data);
+
+		if (content)
+			parse_tree_buffer(tree, content, size);
+	}
+
+	if (repo_parse_tree_gently(ctx->repo, tree, 1)) {
 		error("bad tree object %s", oid_to_hex(oid));
 		return -1;
 	}

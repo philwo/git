@@ -17,6 +17,16 @@ typedef int (*path_fn)(const char *path,
 		       enum object_type type,
 		       void *data);
 
+/**
+ * The type of a function pointer for a method that provides the raw
+ * contents of a tree object. Returns a buffer that the walk takes
+ * ownership of (freed with free()) and sets '*size', or NULL to make
+ * the walk read the tree from the object database instead.
+ */
+typedef void *(*path_walk_tree_content_fn)(const struct object_id *oid,
+					   size_t *size,
+					   void *data);
+
 struct path_walk_info {
 	/**
 	 * revs provides the definitions for the commit walk, including
@@ -32,6 +42,14 @@ struct path_walk_info {
 	 */
 	path_fn path_fn;
 	void *path_fn_data;
+
+	/**
+	 * If set, the walk asks this function for tree contents before
+	 * falling back to the object database. Callers that already know
+	 * where a tree is stored can serve the read from that location.
+	 */
+	path_walk_tree_content_fn tree_content_fn;
+	void *tree_content_fn_data;
 
 	/**
 	 * Initialize which object types the path_fn should be called on. This
