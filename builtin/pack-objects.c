@@ -3506,17 +3506,121 @@ static void *threaded_find_deltas_by_path(void *arg)
 	return NULL;
 }
 
-/* Order regions so that the ones with the most objects come first. */
-static int region_nr_desc(const void *a_, const void *b_)
+/*
+ * Order work units so that the heaviest come first: they start as
+ * early as possible and only light ones are left near the end of the
+ * queue, where they fill in the gaps between finishing threads.
+ */
+static int region_weight_desc(const void *a_, const void *b_)
 {
 	const struct packing_region *a = a_;
 	const struct packing_region *b = b_;
 
-	if (a->nr > b->nr)
+	if (a->weight > b->weight)
 		return -1;
-	if (a->nr < b->nr)
+	if (a->weight < b->weight)
 		return 1;
 	return 0;
+}
+
+static void compute_region_weights(struct object_entry *list,
+				   struct packing_region *regions,
+				   size_t start, size_t nr)
+{
+	for (size_t i = 0; i < nr; i++) {
+		struct packing_region *region = &regions[start + i];
+		size_t weight = 0;
+
+		for (size_t j = 0; j < region->nr; j++) {
+			struct object_entry *e = list + region->start + j;
+			if (e->size_valid)
+				weight += e->size_;
+			else
+				weight += to_pack.oe_size_limit;
+		}
+		region->weight = weight;
+	}
+}
+
+/*
+ * A region is one path's objects and is searched by a single thread, so
+ * the pass cannot finish faster than its heaviest region. Split heavy
+ * regions into work units of consecutive objects: versions of a path
+ * that neighbor in the walk order stay together, which is where the
+ * good delta pairs are.
+ *
+ * A unit normally needs at least two windows' worth of objects or its
+ * delta search finds next to nothing. Units that carry the target
+ * amount of bytes with fewer objects than that are allowed down to
+ * half a window: there each object is a major piece of work by itself,
+ * and a handful of neighboring versions is still a useful window.
+ */
+#define REGION_UNIT_TARGET_BYTES ((size_t)32 << 20)
+#define REGION_SPLIT_MIN_BYTES ((size_t)64 << 20)
+
+static struct packing_region *split_regions_into_units(struct object_entry *list,
+						       struct packing_region *regions,
+						       size_t start, size_t nr,
+						       size_t *nr_units)
+{
+	struct packing_region *units = NULL;
+	size_t units_nr = 0, units_alloc = 0;
+	size_t base_min_nr = (size_t)2 * window;
+	size_t fine_min_nr = window / 2 ? window / 2 : 1;
+
+	for (size_t i = 0; i < nr; i++) {
+		struct packing_region *region = &regions[start + i];
+		size_t max_units, fine_units, want_units;
+		size_t min_take, taken_nr = 0;
+
+		max_units = base_min_nr ? region->nr / base_min_nr : 1;
+		fine_units = region->nr / fine_min_nr;
+		if (fine_units > max_units) {
+			size_t byte_units = region->weight / REGION_UNIT_TARGET_BYTES;
+			max_units = fine_units < byte_units ? fine_units : byte_units;
+			if (max_units < region->nr / base_min_nr)
+				max_units = region->nr / base_min_nr;
+		}
+		want_units = 1 + region->weight / REGION_UNIT_TARGET_BYTES;
+		if (want_units > max_units)
+			want_units = max_units;
+		if (region->weight < REGION_SPLIT_MIN_BYTES || want_units <= 1) {
+			ALLOC_GROW(units, units_nr + 1, units_alloc);
+			units[units_nr++] = *region;
+			continue;
+		}
+
+		min_take = region->nr / want_units;
+		for (size_t u = 0; u < want_units; u++) {
+			struct packing_region *unit;
+			size_t goal = region->weight / want_units;
+			size_t reserved = (want_units - 1 - u) * min_take;
+
+			ALLOC_GROW(units, units_nr + 1, units_alloc);
+			unit = &units[units_nr++];
+			unit->start = region->start + taken_nr;
+			unit->nr = 0;
+			unit->weight = 0;
+
+			while (taken_nr < region->nr) {
+				struct object_entry *e =
+					list + region->start + taken_nr;
+
+				if (u < want_units - 1 &&
+				    unit->nr >= min_take &&
+				    (unit->weight >= goal ||
+				     region->nr - taken_nr <= reserved))
+					break;
+				unit->weight += e->size_valid ?
+					e->size_ : to_pack.oe_size_limit;
+				unit->nr++;
+				taken_nr++;
+			}
+		}
+	}
+
+	*nr_units = units_nr;
+	return units;
 }
 
 static void ll_find_deltas_by_region(struct object_entry *list,
@@ -3524,20 +3628,33 @@ static void ll_find_deltas_by_region(struct object_entry *list,
 				     uint32_t start, uint32_t nr)
 {
 	struct thread_params *p;
+	struct packing_region *units;
+	size_t units_nr = 0;
 	int i, ret, active_threads = 0;
 	unsigned int processed = 0;
 	uint32_t progress_nr;
-	init_threaded_search();
 
 	if (!nr)
 		return;
 
 	progress_nr =  regions[nr - 1].start + regions[nr - 1].nr;
 	if (delta_search_threads <= 1) {
+		init_threaded_search();
 		find_deltas_by_region(list, regions, start, nr);
 		cleanup_threaded_search();
 		return;
 	}
+
+	/*
+	 * Region workloads span orders of magnitude: a path touched by every
+	 * commit lands in the same array as one touched twice, and a few
+	 * versions of a huge blob outweigh thousands of small files. Split
+	 * the heavy regions into units and sort by the byte-based work
+	 * estimate, so the heavy work starts first and spreads out.
+	 */
+	compute_region_weights(list, regions, start, nr);
+	units = split_regions_into_units(list, regions, start, nr, &units_nr);
+	QSORT(units, units_nr, region_weight_desc);
 
 	if (progress > pack_to_stdout)
 		fprintf_ln(stderr,
@@ -3545,28 +3662,22 @@ static void ll_find_deltas_by_region(struct object_entry *list,
 			      "Path-based delta compression using up to %d threads",
 			      delta_search_threads),
 			   delta_search_threads);
-	/*
-	 * Region sizes span orders of magnitude: a path touched by every
-	 * commit lands in the same array as one touched twice. Hand the
-	 * largest out first so the small ones fill in the tail.
-	 */
-	QSORT(regions + start, nr, region_nr_desc);
-
-	CALLOC_ARRAY(p, delta_search_threads);
-
 	if (progress)
 		progress_state = start_progress(the_repository,
 						_("Compressing objects by path"),
 						progress_nr);
 
-	region_cursor = start;
-	region_cursor_end = start + nr;
+	init_threaded_search();
+	CALLOC_ARRAY(p, delta_search_threads);
+
+	region_cursor = 0;
+	region_cursor_end = units_nr;
 
 	for (i = 0; i < delta_search_threads; i++) {
 		p[i].window = window;
 		p[i].depth = depth;
 		p[i].processed = &processed;
-		p[i].regions = regions;
+		p[i].regions = units;
 
 		ret = pthread_create(&p[i].thread, NULL,
 				     threaded_find_deltas_by_path, &p[i]);
@@ -3581,6 +3692,7 @@ static void ll_find_deltas_by_region(struct object_entry *list,
 	}
 	cleanup_threaded_search();
 	free(p);
+	free(units);
 
 	display_progress(progress_state, progress_nr);
 	stop_progress(&progress_state);
