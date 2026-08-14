@@ -150,8 +150,8 @@ static struct type_and_oid_list *add_path_to_list(struct path_walk_context *ctx,
  */
 struct expanded_tree {
 	struct tree *tree;
-	struct name_entry *entries;
-	size_t nr, alloc;
+	uint32_t *offs;		/* entry start offsets, then the size as sentinel */
+	size_t nr, alloc;	/* nr entries; offs holds nr + 1 offsets */
 };
 
 static void expanded_tree_release(struct expanded_tree *ex)
@@ -159,7 +159,7 @@ static void expanded_tree_release(struct expanded_tree *ex)
 	if (ex->tree)
 		free_tree_buffer(ex->tree);
 	ex->tree = NULL;
-	FREE_AND_NULL(ex->entries);
+	FREE_AND_NULL(ex->offs);
 	ex->nr = ex->alloc = 0;
 }
 
@@ -169,6 +169,59 @@ static int tree_entry_identical(const struct name_entry *a,
 	return a->pathlen == b->pathlen && a->mode == b->mode &&
 	       !memcmp(a->path, b->path, a->pathlen) &&
 	       oideq(&a->oid, &b->oid);
+}
+
+/* Trees above this size are expanded without keeping a skip anchor. */
+#define PATH_WALK_MAX_ANCHOR_BYTES ((size_t)64 << 20)
+
+/*
+ * Compare in blocks through memcmp, which is vectorized, and only walk
+ * the mismatching block byte by byte.
+ */
+#define COMMON_LEN_BLOCK 512
+
+static size_t common_prefix_len(const unsigned char *a,
+				const unsigned char *b, size_t n)
+{
+	size_t i = 0;
+
+	while (i + COMMON_LEN_BLOCK <= n &&
+	       !memcmp(a + i, b + i, COMMON_LEN_BLOCK))
+		i += COMMON_LEN_BLOCK;
+	while (i < n && a[i] == b[i])
+		i++;
+	return i;
+}
+
+static size_t common_suffix_len(const unsigned char *a, size_t alen,
+				const unsigned char *b, size_t blen,
+				size_t max)
+{
+	size_t i = 0;
+
+	while (i + COMMON_LEN_BLOCK <= max &&
+	       !memcmp(a + alen - i - COMMON_LEN_BLOCK,
+		       b + blen - i - COMMON_LEN_BLOCK, COMMON_LEN_BLOCK))
+		i += COMMON_LEN_BLOCK;
+	while (i < max && a[alen - 1 - i] == b[blen - 1 - i])
+		i++;
+	return i;
+}
+
+/* Largest index with offs[index] <= pos; offs is ascending, offs[0] == 0. */
+static size_t offs_floor(const uint32_t *offs, size_t nr, size_t pos)
+{
+	size_t lo = 0, hi = nr;	/* offs has nr + 1 slots */
+
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo + 1) / 2;
+
+		if (offs[mid] <= pos)
+			lo = mid;
+		else
+			hi = mid - 1;
+	}
+	return lo;
 }
 
 static int process_tree_entry(struct path_walk_context *ctx,
@@ -317,10 +370,13 @@ static int add_tree_entries(struct path_walk_context *ctx,
 			    struct expanded_tree *prev,
 			    struct expanded_tree *cur)
 {
-	struct tree_desc desc;
-	struct name_entry entry;
+	struct tree_desc desc, prev_desc;
+	struct name_entry entry, pentry;
+	int have_pentry = 0;
 	struct strbuf path = STRBUF_INIT;
-	size_t base_len, j = 0;
+	const unsigned char *buf, *pbuf = NULL;
+	size_t len, plen = 0, lcp = 0, lcs = 0, start = 0, suffix_start;
+	size_t base_len;
 	struct tree *tree = lookup_tree(ctx->repo, oid);
 
 	if (!tree) {
@@ -332,54 +388,118 @@ static int add_tree_entries(struct path_walk_context *ctx,
 		return -1;
 	}
 
-	cur->tree = tree;
-	cur->nr = 0;
-	init_tree_desc(&desc, &tree->object.oid, tree->buffer, tree->size);
-	while (tree_entry(&desc, &entry)) {
-		ALLOC_GROW(cur->entries, cur->nr + 1, cur->alloc);
-		cur->entries[cur->nr++] = entry;
-	}
+	buf = (const unsigned char *)tree->buffer;
+	len = tree->size;
 
 	strbuf_addstr(&path, base_path);
 	base_len = path.len;
 
-	for (size_t i = 0; i < cur->nr; i++) {
-		struct name_entry *e = &cur->entries[i];
+	/*
+	 * With a pattern list, whether an entry is expanded depends on
+	 * more state than the entry itself, so process every entry and
+	 * keep no anchor. Oversized trees keep no anchor either: every
+	 * walker retains up to two anchor buffers, so pathological flat
+	 * trees would otherwise multiply into gigabytes of memory.
+	 */
+	if (ctx->info->pl || len > PATH_WALK_MAX_ANCHOR_BYTES) {
+		int ret = 0;
 
-		/*
-		 * Versions mostly align entry for entry, so test the
-		 * aligned anchor entry first and only fall back to the
-		 * ordered advance on a mismatch. With a pattern list,
-		 * whether an entry is expanded depends on more state than
-		 * the entry itself, so process everything.
-		 */
-		if (!ctx->info->pl && j < prev->nr) {
-			if (tree_entry_identical(&prev->entries[j], e)) {
-				j++;
-				continue;
+		init_tree_desc(&desc, &tree->object.oid, buf, len);
+		while (tree_entry(&desc, &entry)) {
+			if (process_tree_entry(ctx, &path, base_len,
+					       &entry) < 0) {
+				ret = -1;
+				break;
 			}
-			while (j < prev->nr &&
-			       base_name_compare(prev->entries[j].path,
-						 prev->entries[j].pathlen,
-						 prev->entries[j].mode,
-						 e->path, e->pathlen,
-						 e->mode) < 0)
-				j++;
-			if (j < prev->nr &&
-			    tree_entry_identical(&prev->entries[j], e)) {
-				j++;
-				continue;
+		}
+		free_tree_buffer(tree);
+		strbuf_release(&path);
+		return ret;
+	}
+
+	/*
+	 * Compare the raw bytes against the previously expanded version.
+	 * Entries that lie entirely in the identical prefix or suffix
+	 * repeat entries that were already handled when that version was
+	 * expanded, so they are skipped without even decoding them.
+	 */
+	if (prev->tree) {
+		size_t minlen;
+
+		pbuf = (const unsigned char *)prev->tree->buffer;
+		plen = prev->tree->size;
+		minlen = len < plen ? len : plen;
+		lcp = common_prefix_len(buf, pbuf, minlen);
+		lcs = common_suffix_len(buf, len, pbuf, plen, minlen - lcp);
+	}
+	suffix_start = len - lcs;
+
+	cur->tree = tree;
+	cur->nr = 0;
+	if (lcp) {
+		size_t m = offs_floor(prev->offs, prev->nr, lcp);
+
+		ALLOC_GROW(cur->offs, m + 1, cur->alloc);
+		COPY_ARRAY(cur->offs, prev->offs, m + 1);
+		cur->nr = m;
+		start = prev->offs[m];
+	}
+
+	init_tree_desc(&desc, &tree->object.oid, buf + start, len - start);
+	if (prev->tree && start < plen) {
+		init_tree_desc(&prev_desc, &prev->tree->object.oid,
+			       pbuf + start, plen - start);
+		have_pentry = tree_entry(&prev_desc, &pentry);
+	}
+
+	while (desc.size) {
+		size_t pos = (const unsigned char *)desc.buffer - buf;
+
+		if (lcs && pos >= suffix_start) {
+			size_t ppos = (pos + plen) - len;
+			size_t s = offs_floor(prev->offs, prev->nr, ppos);
+
+			if (prev->offs[s] == ppos) {
+				size_t tail = prev->nr - s;
+
+				ALLOC_GROW(cur->offs, cur->nr + tail + 1,
+					   cur->alloc);
+				for (size_t q = 0; q <= tail; q++)
+					cur->offs[cur->nr + q] =
+						(prev->offs[s + q] + len) - plen;
+				cur->nr += tail;
+				goto done;
 			}
 		}
 
-		if (process_tree_entry(ctx, &path, base_len, e) < 0) {
+		if (!tree_entry(&desc, &entry))
+			break;
+		ALLOC_GROW(cur->offs, cur->nr + 2, cur->alloc);
+		cur->offs[cur->nr++] = pos;
+
+		/* Merge against the anchor's entries in the changed span. */
+		while (have_pentry &&
+		       base_name_compare(pentry.path, pentry.pathlen,
+					 pentry.mode, entry.path,
+					 entry.pathlen, entry.mode) < 0)
+			have_pentry = tree_entry(&prev_desc, &pentry);
+		if (have_pentry && tree_entry_identical(&pentry, &entry)) {
+			have_pentry = tree_entry(&prev_desc, &pentry);
+			continue;
+		}
+
+		if (process_tree_entry(ctx, &path, base_len, &entry) < 0) {
 			strbuf_release(&path);
 			free_tree_buffer(cur->tree);
 			cur->tree = NULL;
+			cur->nr = 0;
 			return -1;
 		}
 	}
 
+	ALLOC_GROW(cur->offs, cur->nr + 1, cur->alloc);
+	cur->offs[cur->nr] = len;
+done:
 	strbuf_release(&path);
 	if (prev->tree) {
 		free_tree_buffer(prev->tree);
