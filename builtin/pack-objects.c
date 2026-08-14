@@ -1886,8 +1886,10 @@ static const char no_closure_warning[] = N_(
 "disabling bitmap writing, as some objects are not being packed"
 );
 
-static void add_object_entry(const struct object_id *oid, enum object_type type,
-			     const char *name, int exclude)
+static void add_object_entry_hashed(const struct object_id *oid,
+				    enum object_type type,
+				    uint32_t name_hash, int no_delta,
+				    int exclude)
 {
 	struct packed_git *found_pack = NULL;
 	off_t found_offset = 0;
@@ -1907,9 +1909,15 @@ static void add_object_entry(const struct object_id *oid, enum object_type type,
 		return;
 	}
 
-	create_object_entry(oid, type, pack_name_hash_fn(name),
-			    exclude, name && no_try_delta(name),
+	create_object_entry(oid, type, name_hash, exclude, no_delta,
 			    found_pack, found_offset);
+}
+
+static void add_object_entry(const struct object_id *oid, enum object_type type,
+			     const char *name, int exclude)
+{
+	add_object_entry_hashed(oid, type, pack_name_hash_fn(name),
+				name && no_try_delta(name), exclude);
 }
 
 static int add_object_entry_from_bitmap(const struct object_id *oid,
@@ -4811,6 +4819,8 @@ static int add_objects_by_path(const char *path,
 	size_t oe_start = to_pack.nr_objects;
 	size_t oe_end;
 	unsigned int *processed = data;
+	uint32_t name_hash = pack_name_hash_fn(path);
+	int no_delta = path && no_try_delta(path);
 
 	/*
 	 * First, add all objects to the packing data, including the ones
@@ -4833,7 +4843,7 @@ static int add_objects_by_path(const char *path,
 		if (exclude && !thin)
 			continue;
 
-		add_object_entry(oid, type, path, exclude);
+		add_object_entry_hashed(oid, type, name_hash, no_delta, exclude);
 
 		if (type == OBJ_COMMIT) {
 			struct commit *commit;
