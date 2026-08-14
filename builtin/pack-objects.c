@@ -1514,13 +1514,24 @@ static void write_pack_file(void)
 static int no_try_delta(const char *path)
 {
 	static struct attr_check *check;
+	static struct strbuf last_path = STRBUF_INIT;
+	static int have_last, last_result;
+
+	/*
+	 * The path walk asks about the same path for every object found
+	 * at that path, so remember the previous answer.
+	 */
+	if (have_last && !strcmp(path, last_path.buf))
+		return last_result;
 
 	if (!check)
 		check = attr_check_initl("delta", NULL);
 	git_check_attr(the_repository->index, path, check);
-	if (ATTR_FALSE(check->items[0].value))
-		return 1;
-	return 0;
+	strbuf_reset(&last_path);
+	strbuf_addstr(&last_path, path);
+	have_last = 1;
+	last_result = ATTR_FALSE(check->items[0].value) ? 1 : 0;
+	return last_result;
 }
 
 /*
