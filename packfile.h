@@ -10,6 +10,7 @@
 #include "strmap.h"
 
 /* in odb.h */
+struct bitmap;
 struct object_info;
 struct odb_read_stream;
 
@@ -35,6 +36,12 @@ struct packed_git {
 		 multi_pack_index:1,
 		 is_cruft:1;
 	unsigned char hash[GIT_MAX_RAWSZ];
+	/*
+	 * One bit per object, set once its packed representation passed a
+	 * CRC check, so that repeated reads do not verify it again. Only
+	 * allocated when do_check_packed_object_crc is in effect.
+	 */
+	struct bitmap *crc_checked;
 	struct revindex_entry *revindex;
 	const uint32_t *revindex_data;
 	const uint32_t *revindex_map;

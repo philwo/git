@@ -26,6 +26,7 @@
 #include "pack-revindex.h"
 #include "promisor-remote.h"
 #include "pack-mtimes.h"
+#include "ewah/ewok.h"
 
 char *odb_pack_name(struct repository *r, struct strbuf *buf,
 		    const unsigned char *hash, const char *ext)
@@ -447,6 +448,8 @@ void close_pack(struct packed_git *p)
 	close_pack_revindex(p);
 	close_pack_mtimes(p);
 	oidset_clear(&p->bad_objects);
+	bitmap_free(p->crc_checked);
+	p->crc_checked = NULL;
 }
 
 void unlink_pack_path(const char *pack_name, int force_delete)
@@ -1825,16 +1828,30 @@ void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
 				goto out;
 			}
 
-			len = pack_pos_to_offset(p, pack_pos + 1) - obj_offset;
-			index_pos = pack_pos_to_index(p, pack_pos);
-			if (check_pack_crc(p, &w_curs, obj_offset, len, index_pos)) {
-				struct object_id oid;
-				nth_packed_object_id(&oid, p, index_pos);
-				error("bad packed object CRC for %s",
-				      oid_to_hex(&oid));
-				mark_bad_packed_object(p, &oid);
-				data = NULL;
-				goto out;
+			/*
+			 * Delta chains overlap, so the same entry is
+			 * traversed many times; verify its CRC only on the
+			 * first visit. This trades away re-detection when a
+			 * clean page is evicted and later re-read from a
+			 * failing disk; fsck stays the thorough check.
+			 */
+			if (!p->crc_checked)
+				p->crc_checked = bitmap_word_alloc(
+					((size_t)p->num_objects +
+					 BITS_IN_EWORD - 1) / BITS_IN_EWORD);
+			if (!bitmap_get(p->crc_checked, pack_pos)) {
+				len = pack_pos_to_offset(p, pack_pos + 1) - obj_offset;
+				index_pos = pack_pos_to_index(p, pack_pos);
+				if (check_pack_crc(p, &w_curs, obj_offset, len, index_pos)) {
+					struct object_id oid;
+					nth_packed_object_id(&oid, p, index_pos);
+					error("bad packed object CRC for %s",
+					      oid_to_hex(&oid));
+					mark_bad_packed_object(p, &oid);
+					data = NULL;
+					goto out;
+				}
+				bitmap_set(p->crc_checked, pack_pos);
 			}
 		}
 
