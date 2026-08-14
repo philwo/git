@@ -2906,11 +2906,17 @@ static ssize_t read_istream_pack_non_delta(struct odb_read_stream *_st, char *bu
 		break;
 	}
 
+	/*
+	 * pack-objects streams large blobs from its writer thread while
+	 * write-prep workers grow and evict pack windows under the
+	 * object read lock, so hold it around each window use.
+	 */
 	while (total_read < sz) {
 		int status;
 		struct pack_window *window = NULL;
 		unsigned char *mapped;
 
+		obj_read_lock();
 		mapped = use_pack(st->pack, &window,
 				  st->pos, &st->z.avail_in);
 
@@ -2922,6 +2928,7 @@ static ssize_t read_istream_pack_non_delta(struct odb_read_stream *_st, char *bu
 		st->pos += st->z.next_in - mapped;
 		total_read = st->z.next_out - (unsigned char *)buf;
 		unuse_pack(&window);
+		obj_read_unlock();
 
 		if (status == Z_STREAM_END) {
 			git_inflate_end(&st->z);
@@ -2964,8 +2971,10 @@ int packfile_read_object_stream(struct odb_read_stream **out,
 	enum object_type in_pack_type;
 	size_t size;
 
+	obj_read_lock();
 	in_pack_type = unpack_object_header(pack, &window, &offset, &size);
 	unuse_pack(&window);
+	obj_read_unlock();
 
 	if (repo_settings_get_big_file_threshold(pack->repo) >= size)
 		return -1;
@@ -3002,8 +3011,13 @@ int packfile_store_read_object_stream(struct odb_read_stream **out,
 				      const struct object_id *oid)
 {
 	struct pack_entry e;
+	int found;
 
-	if (!find_pack_entry(store, oid, &e))
+	/* find_pack_entry() reorders the pack MRU list. */
+	obj_read_lock();
+	found = find_pack_entry(store, oid, &e);
+	obj_read_unlock();
+	if (!found)
 		return -1;
 
 	return packfile_read_object_stream(out, oid, e.p, e.offset);

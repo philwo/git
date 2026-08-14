@@ -228,6 +228,7 @@ static int window = 10;
 static unsigned long pack_size_limit;
 static int depth = 50;
 static int delta_search_threads;
+static int write_threads;
 static int pack_to_stdout;
 static int sparse;
 static int thin;
@@ -451,6 +452,244 @@ static unsigned long write_large_blob_data(struct odb_read_stream *st, struct ha
 }
 
 /*
+ * Parallel payload preparation for the write phase.
+ *
+ * With no pack size limit, the exact order in which objects land in the
+ * pack is known up front (compute_emit_order()). Worker threads run
+ * ahead of the writer along that order and do the expensive part of
+ * write_no_reuse_object() - reading the object, recomputing an uncached
+ * delta, deflating - while the writer consumes the results in order and
+ * writes them out. A prepared payload is byte-identical to what the
+ * writer would have produced itself. The ring bounds the lookahead and
+ * the byte budget bounds how much prepared data can pile up.
+ */
+
+enum write_prep_state {
+	WRITE_PREP_EMPTY = 0,	/* not claimed by any thread yet */
+	WRITE_PREP_BUSY,	/* a worker is producing the payload */
+	WRITE_PREP_READY,	/* payload available for the writer */
+	WRITE_PREP_NONE		/* nothing prepared; writer works as usual */
+};
+
+struct write_prep_slot {
+	enum write_prep_state state;
+	unsigned is_delta;	/* payload is delta data against DELTA(entry) */
+	enum object_type type;	/* object type of a non-delta payload */
+	void *buf;		/* deflated payload */
+	unsigned long size;	/* uncompressed size, for the object header */
+	unsigned long datalen;	/* deflated size */
+	size_t accounted;	/* bytes counted against wprep.inflight */
+};
+
+#define WRITE_PREP_RING_SIZE 2048
+#define WRITE_PREP_BUDGET ((size_t)256 << 20)
+
+static struct {
+	struct object_entry **order;
+	uint32_t nr;
+	struct write_prep_slot *ring;
+	pthread_mutex_t mutex;
+	pthread_cond_t can_claim;	/* the window advanced or bytes were freed */
+	pthread_cond_t ready;		/* a slot became READY */
+	uint32_t next_claim;		/* next order index a worker may take */
+	uint32_t writer_pos;		/* first order index not yet written */
+	size_t inflight;		/* payload bytes prepared but not yet written */
+	int nr_claim_waiters;		/* workers blocked in can_claim */
+	int writer_waiting;		/* writer blocked in ready */
+	uint32_t nr_prepared;
+	uint32_t nr_stolen;
+} wprep;
+
+/*
+ * Decide whether write_object() will copy this entry's bytes straight
+ * from its source pack instead of producing them afresh. The writer
+ * and the write-prep workers must agree on this for every entry.
+ */
+static int want_pack_reuse(struct object_entry *entry, int usable_delta)
+{
+	if (!reuse_object)
+		return 0;	/* explicit */
+	if (!IN_PACK(entry))
+		return 0;	/* can't reuse what we don't have */
+	if (oe_type(entry) == OBJ_REF_DELTA || oe_type(entry) == OBJ_OFS_DELTA)
+		/* check_object() decided it for us, but pack split may override */
+		return usable_delta;
+	if (oe_type(entry) != entry->in_pack_type)
+		return 0;	/* pack has delta which is unusable */
+	if (DELTA(entry))
+		return 0;	/* we want to pack afresh */
+	/* we have it in-pack undeltified, and we do not need to deltify it */
+	return 1;
+}
+
+/*
+ * Decide whether a worker should prepare this entry's payload, i.e.
+ * whether the writer will take the write_no_reuse_object() path and
+ * deflate a buffer there. Mirrors write_no_reuse_object()'s buffer
+ * choices for the case without a pack size limit.
+ */
+static enum write_prep_state write_prep_kind(struct object_entry *e,
+					     unsigned *is_delta, size_t *est)
+{
+	/* with no pack size limit, a delta whose base is in the pack is usable */
+	if (want_pack_reuse(e, DELTA(e) ? 1 : 0))
+		return WRITE_PREP_NONE;
+	if (DELTA(e)) {
+		if (e->delta_data && e->z_delta_size)
+			return WRITE_PREP_NONE; /* deflated in the delta phase */
+		*is_delta = 1;
+		*est = DELTA_SIZE(e);
+		if (!e->delta_data) {
+			/* get_delta() will hold the full object as well */
+			if (!e->size_valid)
+				return WRITE_PREP_NONE;
+			*est += e->size_;
+		}
+	} else {
+		if (!e->size_valid)
+			return WRITE_PREP_NONE;
+		if (e->size_ > repo_settings_get_big_file_threshold(the_repository))
+			return WRITE_PREP_NONE; /* may stream from the odb */
+		*is_delta = 0;
+		*est = e->size_;
+	}
+	return WRITE_PREP_BUSY;
+}
+
+static void write_prep_produce(struct object_entry *e, unsigned is_delta,
+			       struct write_prep_slot *out)
+{
+	void *buf;
+	unsigned long size;
+
+	if (is_delta) {
+		if (e->delta_data) {
+			buf = e->delta_data;
+			e->delta_data = NULL;
+		} else {
+			buf = get_delta(e);
+		}
+		size = DELTA_SIZE(e);
+	} else {
+		enum object_type type;
+		size_t size_st = 0;
+
+		buf = odb_read_object(the_repository->objects, &e->idx.oid,
+				      &type, &size_st);
+		if (!buf)
+			die(_("unable to read %s"), oid_to_hex(&e->idx.oid));
+		size = cast_size_t_to_ulong(size_st);
+		/*
+		 * Like write_no_reuse_object(): drop any stale cached
+		 * delta, but do not touch z_delta_size, whose bitfield
+		 * word another worker may read from this entry.
+		 */
+		FREE_AND_NULL(e->delta_data);
+		out->type = type;
+	}
+	out->is_delta = is_delta;
+	out->size = size;
+	out->datalen = do_compress(&buf, size);
+	out->buf = buf;
+}
+
+static void *write_prep_thread(void *arg UNUSED)
+{
+	pthread_mutex_lock(&wprep.mutex);
+	while (wprep.next_claim < wprep.nr) {
+		struct object_entry *e = NULL;
+		struct write_prep_slot *slot = NULL, local;
+		unsigned is_delta = 0;
+		size_t est = 0;
+
+		if (wprep.next_claim >= wprep.writer_pos + WRITE_PREP_RING_SIZE ||
+		    wprep.inflight >= WRITE_PREP_BUDGET) {
+			wprep.nr_claim_waiters++;
+			pthread_cond_wait(&wprep.can_claim, &wprep.mutex);
+			wprep.nr_claim_waiters--;
+			continue;
+		}
+		/*
+		 * Mark entries that need no preparation until we run into
+		 * one whose payload we should produce, all under one lock.
+		 */
+		while (wprep.next_claim < wprep.nr &&
+		       wprep.next_claim < wprep.writer_pos + WRITE_PREP_RING_SIZE) {
+			uint32_t i = wprep.next_claim++;
+
+			e = wprep.order[i];
+			slot = &wprep.ring[i % WRITE_PREP_RING_SIZE];
+			slot->state = write_prep_kind(e, &is_delta, &est);
+			if (slot->state == WRITE_PREP_BUSY)
+				break;
+			slot = NULL;
+		}
+		if (!slot)
+			continue;
+		slot->accounted = est;
+		wprep.inflight += est;
+		pthread_mutex_unlock(&wprep.mutex);
+
+		memset(&local, 0, sizeof(local));
+		write_prep_produce(e, is_delta, &local);
+
+		pthread_mutex_lock(&wprep.mutex);
+		slot->is_delta = local.is_delta;
+		slot->type = local.type;
+		slot->buf = local.buf;
+		slot->size = local.size;
+		slot->datalen = local.datalen;
+		slot->state = WRITE_PREP_READY;
+		if (wprep.writer_waiting)
+			pthread_cond_signal(&wprep.ready);
+	}
+	pthread_mutex_unlock(&wprep.mutex);
+	return NULL;
+}
+
+/*
+ * Fetch the prepared payload for emit order index i, waiting for its
+ * worker if necessary. Returns 1 if a payload was prepared. If no
+ * worker has claimed the entry yet, claim it for the writer so that
+ * the two never work on the same entry.
+ */
+static int write_prep_take(uint32_t i, struct write_prep_slot *out)
+{
+	struct write_prep_slot *slot;
+	int ready;
+
+	pthread_mutex_lock(&wprep.mutex);
+	slot = &wprep.ring[i % WRITE_PREP_RING_SIZE];
+	while (slot->state == WRITE_PREP_BUSY) {
+		wprep.writer_waiting = 1;
+		pthread_cond_wait(&wprep.ready, &wprep.mutex);
+		wprep.writer_waiting = 0;
+	}
+	if (slot->state == WRITE_PREP_EMPTY) {
+		if (wprep.next_claim != i)
+			BUG("empty write_prep slot %"PRIu32" but next claim is %"PRIu32,
+			    i, wprep.next_claim);
+		wprep.next_claim = i + 1;
+		slot->state = WRITE_PREP_NONE;
+		wprep.nr_stolen++;
+	}
+	ready = slot->state == WRITE_PREP_READY;
+	if (ready) {
+		*out = *slot;
+		wprep.inflight -= slot->accounted;
+		wprep.nr_prepared++;
+	}
+	slot->state = WRITE_PREP_EMPTY;
+	slot->buf = NULL;
+	slot->accounted = 0;
+	wprep.writer_pos = i + 1;
+	if (wprep.nr_claim_waiters)
+		pthread_cond_signal(&wprep.can_claim);
+	pthread_mutex_unlock(&wprep.mutex);
+	return ready;
+}
+
+/*
  * we are going to reuse the existing object data as is.  make
  * sure it is not corrupt.
  */
@@ -480,6 +719,13 @@ static int check_pack_inflate(struct packed_git *p,
 		stream.total_in == len) ? 0 : -1;
 }
 
+/*
+ * The write-prep workers grow and evict pack windows under the object
+ * read lock while this runs on the writer thread, so each use_pack()
+ * must hold it too. The bytes can be written out after unlocking: the
+ * window stays pinned, and thus mapped, until the next use_pack() or
+ * unuse_pack() on this cursor.
+ */
 static void copy_pack_data(struct hashfile *f,
 		struct packed_git *p,
 		struct pack_window **w_curs,
@@ -490,13 +736,22 @@ static void copy_pack_data(struct hashfile *f,
 	unsigned long avail;
 
 	while (len) {
+		obj_read_lock();
 		in = use_pack(p, w_curs, offset, &avail);
+		obj_read_unlock();
 		if (avail > len)
 			avail = (unsigned long)len;
 		hashwrite(f, in, avail);
 		offset += avail;
 		len -= avail;
 	}
+}
+
+static void unuse_pack_locked(struct pack_window **w_curs)
+{
+	obj_read_lock();
+	unuse_pack(w_curs);
+	obj_read_unlock();
 }
 
 static inline int oe_size_greater_than(struct packing_data *pack,
@@ -512,9 +767,11 @@ static inline int oe_size_greater_than(struct packing_data *pack,
 
 /* Return 0 if we will bust the pack-size limit */
 static unsigned long write_no_reuse_object(struct hashfile *f, struct object_entry *entry,
-					   unsigned long limit, int usable_delta)
+					   unsigned long limit, int usable_delta,
+					   struct write_prep_slot *prep)
 {
 	unsigned long size, datalen;
+	unsigned long z_cached = 0;
 	unsigned char header[MAX_PACK_OBJECT_HEADER],
 		      dheader[MAX_PACK_OBJECT_HEADER];
 	unsigned hdrlen;
@@ -523,7 +780,16 @@ static unsigned long write_no_reuse_object(struct hashfile *f, struct object_ent
 	struct odb_read_stream *st = NULL;
 	const unsigned hashsz = the_hash_algo->rawsz;
 
-	if (!usable_delta) {
+	if (prep) {
+		/* a write-phase worker already read and deflated the data */
+		buf = prep->buf;
+		size = prep->size;
+		if (prep->is_delta)
+			type = (allow_ofs_delta && DELTA(entry)->idx.offset) ?
+				OBJ_OFS_DELTA : OBJ_REF_DELTA;
+		else
+			type = prep->type;
+	} else if (!usable_delta) {
 		if (oe_type(entry) == OBJ_BLOB &&
 		    oe_size_greater_than(&to_pack, entry,
 					 repo_settings_get_big_file_threshold(the_repository)) &&
@@ -543,15 +809,17 @@ static unsigned long write_no_reuse_object(struct hashfile *f, struct object_ent
 				    oid_to_hex(&entry->idx.oid));
 		}
 		/*
-		 * make sure no cached delta data remains from a
-		 * previous attempt before a pack split occurred.
+		 * Drop cached delta data from a previous attempt before
+		 * a pack split. Keep z_delta_size: its bitfield word is
+		 * read concurrently by write-phase workers, and it means
+		 * nothing without delta_data.
 		 */
 		FREE_AND_NULL(entry->delta_data);
-		entry->z_delta_size = 0;
 	} else if (entry->delta_data) {
 		size = DELTA_SIZE(entry);
 		buf = entry->delta_data;
 		entry->delta_data = NULL;
+		z_cached = entry->z_delta_size;
 		type = (allow_ofs_delta && DELTA(entry)->idx.offset) ?
 			OBJ_OFS_DELTA : OBJ_REF_DELTA;
 	} else {
@@ -563,8 +831,10 @@ static unsigned long write_no_reuse_object(struct hashfile *f, struct object_ent
 
 	if (st)	/* large blob case, just assume we don't compress well */
 		datalen = size;
-	else if (entry->z_delta_size)
-		datalen = entry->z_delta_size;
+	else if (prep)
+		datalen = prep->datalen;
+	else if (z_cached)	/* the cached delta is already deflated */
+		datalen = z_cached;
 	else
 		datalen = do_compress(&buf, size);
 
@@ -646,7 +916,13 @@ static off_t write_reuse_object(struct hashfile *f, struct object_entry *entry,
 	const unsigned hashsz = the_hash_algo->rawsz;
 	size_t entry_size;
 
+	/*
+	 * The write-prep workers read objects under the object read lock
+	 * concurrently with this writer, so hold it around all pack
+	 * window use. The pinned window outlives the unlock.
+	 */
 	cur = entry->in_pack_offset;
+	obj_read_lock();
 	in_pack_type = unpack_object_header(p, &w_curs, &cur, &entry_size);
 	if (in_pack_type < 0)
 		die(_("write_reuse_object: unable to parse object header of %s"),
@@ -671,7 +947,8 @@ static off_t write_reuse_object(struct hashfile *f, struct object_entry *entry,
 		error(_("bad packed object CRC for %s"),
 		      oid_to_hex(&entry->idx.oid));
 		unuse_pack(&w_curs);
-		return write_no_reuse_object(f, entry, limit, usable_delta);
+		obj_read_unlock();
+		return write_no_reuse_object(f, entry, limit, usable_delta, NULL);
 	}
 
 	offset += entry->in_pack_header_size;
@@ -682,8 +959,10 @@ static off_t write_reuse_object(struct hashfile *f, struct object_entry *entry,
 		error(_("corrupt packed object for %s"),
 		      oid_to_hex(&entry->idx.oid));
 		unuse_pack(&w_curs);
-		return write_no_reuse_object(f, entry, limit, usable_delta);
+		obj_read_unlock();
+		return write_no_reuse_object(f, entry, limit, usable_delta, NULL);
 	}
+	obj_read_unlock();
 
 	if (type == OBJ_OFS_DELTA) {
 		off_t ofs = entry->idx.offset - DELTA(entry)->idx.offset;
@@ -692,7 +971,7 @@ static off_t write_reuse_object(struct hashfile *f, struct object_entry *entry,
 		while (ofs >>= 7)
 			dheader[--pos] = 128 | (--ofs & 127);
 		if (limit && hdrlen + sizeof(dheader) - pos + datalen + hashsz >= limit) {
-			unuse_pack(&w_curs);
+			unuse_pack_locked(&w_curs);
 			return 0;
 		}
 		hashwrite(f, header, hdrlen);
@@ -701,7 +980,7 @@ static off_t write_reuse_object(struct hashfile *f, struct object_entry *entry,
 		reused_delta++;
 	} else if (type == OBJ_REF_DELTA) {
 		if (limit && hdrlen + hashsz + datalen + hashsz >= limit) {
-			unuse_pack(&w_curs);
+			unuse_pack_locked(&w_curs);
 			return 0;
 		}
 		hashwrite(f, header, hdrlen);
@@ -710,13 +989,13 @@ static off_t write_reuse_object(struct hashfile *f, struct object_entry *entry,
 		reused_delta++;
 	} else {
 		if (limit && hdrlen + datalen + hashsz >= limit) {
-			unuse_pack(&w_curs);
+			unuse_pack_locked(&w_curs);
 			return 0;
 		}
 		hashwrite(f, header, hdrlen);
 	}
 	copy_pack_data(f, p, &w_curs, offset, datalen);
-	unuse_pack(&w_curs);
+	unuse_pack_locked(&w_curs);
 	reused++;
 	return hdrlen + datalen;
 }
@@ -724,7 +1003,8 @@ static off_t write_reuse_object(struct hashfile *f, struct object_entry *entry,
 /* Return 0 if we will bust the pack-size limit */
 static off_t write_object(struct hashfile *f,
 			  struct object_entry *entry,
-			  off_t write_offset)
+			  off_t write_offset,
+			  struct write_prep_slot *prep)
 {
 	unsigned long limit;
 	off_t len;
@@ -756,28 +1036,15 @@ static off_t write_object(struct hashfile *f,
 	else
 		usable_delta = 0;	/* base could end up in another pack */
 
-	if (!reuse_object)
-		to_reuse = 0;	/* explicit */
-	else if (!IN_PACK(entry))
-		to_reuse = 0;	/* can't reuse what we don't have */
-	else if (oe_type(entry) == OBJ_REF_DELTA ||
-		 oe_type(entry) == OBJ_OFS_DELTA)
-				/* check_object() decided it for us ... */
-		to_reuse = usable_delta;
-				/* ... but pack split may override that */
-	else if (oe_type(entry) != entry->in_pack_type)
-		to_reuse = 0;	/* pack has delta which is unusable */
-	else if (DELTA(entry))
-		to_reuse = 0;	/* we want to pack afresh */
-	else
-		to_reuse = 1;	/* we have it in-pack undeltified,
-				 * and we do not need to deltify it.
-				 */
+	to_reuse = want_pack_reuse(entry, usable_delta);
 
-	if (!to_reuse)
-		len = write_no_reuse_object(f, entry, limit, usable_delta);
-	else
+	if (!to_reuse) {
+		len = write_no_reuse_object(f, entry, limit, usable_delta, prep);
+	} else {
+		if (prep)
+			BUG("prepared payload for a reused object");
 		len = write_reuse_object(f, entry, limit, usable_delta);
+	}
 	if (!len)
 		return 0;
 
@@ -835,7 +1102,7 @@ static enum write_one_status write_one(struct hashfile *f,
 	}
 
 	e->idx.offset = *offset;
-	size = write_object(f, e, *offset);
+	size = write_object(f, e, *offset, NULL);
 	if (!size) {
 		e->idx.offset = recursing;
 		return WRITE_ONE_BREAK;
@@ -847,6 +1114,125 @@ static enum write_one_status write_one(struct hashfile *f,
 		die(_("pack too large for current definition of off_t"));
 	*offset += size;
 	return WRITE_ONE_WRITTEN;
+}
+
+/*
+ * Simulate the write_one() recursion over the write order to get the
+ * exact sequence in which objects will land in the pack: each entry is
+ * preceded by its not-yet-emitted delta base chain, deepest base first.
+ * Returns NULL if a delta cycle is found; the serial writer handles
+ * that case.
+ */
+static struct object_entry **compute_emit_order(struct object_entry **write_order,
+						uint32_t *emit_nr)
+{
+	struct object_entry **order, **chain = NULL;
+	uint8_t *state;	/* 0 = not emitted, 1 = on the chain, 2 = emitted */
+	size_t chain_nr = 0, chain_alloc = 0;
+	uint32_t nr = 0, i;
+
+	ALLOC_ARRAY(order, to_pack.nr_objects);
+	CALLOC_ARRAY(state, to_pack.nr_objects);
+
+	for (i = 0; i < to_pack.nr_objects; i++) {
+		struct object_entry *e = write_order[i];
+
+		chain_nr = 0;
+		while (e && !e->preferred_base &&
+		       state[e - to_pack.objects] == 0) {
+			state[e - to_pack.objects] = 1;
+			ALLOC_GROW(chain, chain_nr + 1, chain_alloc);
+			chain[chain_nr++] = e;
+			e = DELTA(e);
+		}
+		if (e && !e->preferred_base &&
+		    state[e - to_pack.objects] == 1) {
+			free(order);
+			free(state);
+			free(chain);
+			return NULL;
+		}
+		while (chain_nr) {
+			e = chain[--chain_nr];
+			state[e - to_pack.objects] = 2;
+			order[nr++] = e;
+		}
+	}
+	free(state);
+	free(chain);
+	*emit_nr = nr;
+	return order;
+}
+
+static void write_objects_parallel(struct hashfile *f,
+				   struct object_entry **emit_order,
+				   uint32_t emit_nr, off_t *offset)
+{
+	pthread_t *threads;
+	int nr_threads = write_threads;
+	uint32_t i;
+
+	/* look it up once so the worker threads never race to cache it */
+	repo_settings_get_big_file_threshold(the_repository);
+
+	if (emit_nr < (uint32_t)nr_threads)
+		nr_threads = emit_nr;
+
+	memset(&wprep, 0, sizeof(wprep));
+	wprep.order = emit_order;
+	wprep.nr = emit_nr;
+	CALLOC_ARRAY(wprep.ring, WRITE_PREP_RING_SIZE);
+	pthread_mutex_init(&wprep.mutex, NULL);
+	pthread_cond_init(&wprep.can_claim, NULL);
+	pthread_cond_init(&wprep.ready, NULL);
+	enable_obj_read_lock();
+
+	ALLOC_ARRAY(threads, nr_threads);
+	for (i = 0; i < (uint32_t)nr_threads; i++) {
+		int ret = pthread_create(&threads[i], NULL,
+					 write_prep_thread, NULL);
+		if (ret)
+			die(_("unable to create thread: %s"), strerror(ret));
+	}
+
+	for (i = 0; i < emit_nr; i++) {
+		struct object_entry *e = emit_order[i];
+		struct write_prep_slot prep;
+		int prepared = write_prep_take(i, &prep);
+		off_t size;
+
+		e->idx.offset = *offset;
+		size = write_object(f, e, *offset, prepared ? &prep : NULL);
+		if (!size)
+			BUG("write_object failed with no pack size limit");
+		written_list[nr_written++] = &e->idx;
+
+		/* make sure off_t is sufficiently large not to wrap */
+		if (signed_add_overflows(*offset, size))
+			die(_("pack too large for current definition of off_t"));
+		*offset += size;
+		display_progress(progress_state, written);
+	}
+
+	/* wake any workers still blocked on claim admission */
+	pthread_mutex_lock(&wprep.mutex);
+	pthread_cond_broadcast(&wprep.can_claim);
+	pthread_mutex_unlock(&wprep.mutex);
+
+	for (i = 0; i < (uint32_t)nr_threads; i++)
+		pthread_join(threads[i], NULL);
+	free(threads);
+
+	disable_obj_read_lock();
+	pthread_cond_destroy(&wprep.ready);
+	pthread_cond_destroy(&wprep.can_claim);
+	pthread_mutex_destroy(&wprep.mutex);
+	FREE_AND_NULL(wprep.ring);
+
+	trace2_data_intmax("pack-objects", the_repository,
+			   "write_prep/prepared", wprep.nr_prepared);
+	trace2_data_intmax("pack-objects", the_repository,
+			   "write_prep/stolen", wprep.nr_stolen);
 }
 
 static int mark_tagged(const struct reference *ref, void *cb_data UNUSED)
@@ -1381,6 +1767,19 @@ static void write_pack_file(void)
 		}
 
 		nr_written = 0;
+		if (!pack_size_limit && !reuse_packfiles_nr &&
+		    to_pack.nr_objects && HAVE_THREADS && write_threads > 1) {
+			uint32_t emit_nr;
+			struct object_entry **emit_order =
+				compute_emit_order(write_order, &emit_nr);
+
+			if (emit_order) {
+				write_objects_parallel(f, emit_order, emit_nr,
+						       &offset);
+				free(emit_order);
+				i = to_pack.nr_objects;
+			}
+		}
 		for (; i < to_pack.nr_objects; i++) {
 			struct object_entry *e = write_order[i];
 			if (write_one(f, e, &offset) == WRITE_ONE_BREAK)
@@ -3856,6 +4255,17 @@ static int git_pack_config(const char *k, const char *v,
 		}
 		return 0;
 	}
+	if (!strcmp(k, "pack.writethreads")) {
+		write_threads = git_config_int(k, v, ctx->kvi);
+		if (write_threads < 0)
+			die(_("invalid number of threads specified (%d)"),
+			    write_threads);
+		if (!HAVE_THREADS && write_threads != 1) {
+			warning(_("no threads support, ignoring %s"), k);
+			write_threads = 0;
+		}
+		return 0;
+	}
 	if (!strcmp(k, "pack.indexversion")) {
 		pack_idx_opts.version = git_config_int(k, v, ctx->kvi);
 		if (pack_idx_opts.version > 2)
@@ -5416,6 +5826,14 @@ int cmd_pack_objects(int argc,
 
 	if (!delta_search_threads)	/* --threads=0 means autodetect */
 		delta_search_threads = online_cpus();
+	if (!write_threads) {		/* pack.writeThreads=0 picks a default */
+		/*
+		 * Writing to stdout usually means serving a fetch, where
+		 * many pack-objects processes can run at once; stay with
+		 * one writer thread there unless configured explicitly.
+		 */
+		write_threads = pack_to_stdout ? 1 : delta_search_threads;
+	}
 
 	if (!HAVE_THREADS && delta_search_threads != 1)
 		warning(_("no threads support, ignoring --threads"));

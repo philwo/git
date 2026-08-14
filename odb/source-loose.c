@@ -354,12 +354,21 @@ static int odb_source_loose_read_object_stream(struct odb_read_stream **out,
 	struct odb_source_loose *loose = odb_source_loose_downcast(source);
 	struct object_info oi = OBJECT_INFO_INIT;
 	struct odb_loose_read_stream *st;
+	enum unpack_loose_header_result unpack_result;
 	unsigned long mapsize;
 	void *mapped;
 
+	/*
+	 * Streams are opened without the object read lock held, but
+	 * unpack_loose_header() drops and retakes the lock around its
+	 * inflate and thus requires the caller to hold it.
+	 */
+	obj_read_lock();
 	mapped = odb_source_loose_map_object(loose, oid, &mapsize);
-	if (!mapped)
+	if (!mapped) {
+		obj_read_unlock();
 		return -1;
+	}
 
 	/*
 	 * Note: we must allocate this structure early even though we may still
@@ -369,8 +378,10 @@ static int odb_source_loose_read_object_stream(struct odb_read_stream **out,
 	 */
 	CALLOC_ARRAY(st, 1);
 
-	switch (unpack_loose_header(&st->z, mapped, mapsize, st->hdr,
-				    sizeof(st->hdr))) {
+	unpack_result = unpack_loose_header(&st->z, mapped, mapsize, st->hdr,
+					    sizeof(st->hdr));
+	obj_read_unlock();
+	switch (unpack_result) {
 	case ULHR_OK:
 		break;
 	case ULHR_BAD:
