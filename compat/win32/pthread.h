@@ -24,6 +24,7 @@ static inline int return_0(int i UNUSED) {
 #define pthread_mutex_init(a,b) return_0((InitializeCriticalSection((a)), 0))
 #define pthread_mutex_destroy(a) DeleteCriticalSection((a))
 #define pthread_mutex_lock EnterCriticalSection
+#define pthread_mutex_trylock(a) (TryEnterCriticalSection((a)) ? 0 : EBUSY)
 #define pthread_mutex_unlock LeaveCriticalSection
 
 typedef int pthread_mutexattr_t;
