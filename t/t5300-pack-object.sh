@@ -742,4 +742,33 @@ test_expect_success '--path-walk thin pack' '
 	git -C server index-pack --fix-thin --stdin <out.pack
 '
 
+# A pack written to disk walks the full uninteresting boundary; check
+# that a range pack over changed and unchanged directories contains
+# exactly the objects the range introduces.
+test_expect_success '--path-walk to-disk pack of a range' '
+	git init range &&
+	(
+		cd range &&
+		mkdir stable moving &&
+		echo s1 >stable/file &&
+		echo m1 >moving/file &&
+		git add . &&
+		git commit -m base &&
+		echo m2 >moving/file &&
+		git commit -am middle &&
+		echo m3 >moving/file &&
+		git commit -am tip &&
+		git rev-list --objects HEAD~2..HEAD >raw &&
+		cut -d" " -f1 <raw | sort >expect &&
+		cat >in <<-EOF &&
+		$(git rev-parse HEAD)
+		^$(git rev-parse HEAD~2)
+		EOF
+		git pack-objects --revs --path-walk range <in >name &&
+		git show-index <range-$(cat name).idx |
+		cut -d" " -f2 | sort >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_done

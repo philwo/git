@@ -981,14 +981,16 @@ int walk_objects_by_path(struct path_walk_info *info)
 	info->revs->tree_objects = info->trees;
 
 	/*
-	 * Walk trees to mark them as UNINTERESTING.
-	 * This is particularly important when 'edge_aggressive' is set.
+	 * Mark trees reachable from the boundary as UNINTERESTING, with
+	 * the walk the caller picked: see 'full_boundary_walk' in
+	 * path-walk.h for the trade-off between the two.
 	 */
 	info->revs->edge_hint_aggressive = info->edge_aggressive;
 	edge_repo = info->revs->repo;
 	edge_tree_list = root_tree_list;
 	mark_edges_uninteresting(info->revs, show_edge,
-				 info->prune_all_uninteresting);
+				 info->prune_all_uninteresting &&
+				 !info->full_boundary_walk);
 	edge_repo = NULL;
 	edge_tree_list = NULL;
 

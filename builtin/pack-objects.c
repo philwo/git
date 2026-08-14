@@ -4839,6 +4839,15 @@ static int get_object_list_path_walk(struct rev_info *revs)
 	info.prune_all_uninteresting = sparse;
 	info.edge_aggressive = shallow;
 
+	/*
+	 * For a pack written to disk (repack of a range), the full
+	 * boundary walk parses each boundary tree only once and packs
+	 * the range tighter. When writing to stdout (push, fetch), a
+	 * small range over a large tree is the common case and the
+	 * sparse walk selected by --sparse keeps it fast.
+	 */
+	info.full_boundary_walk = !pack_to_stdout;
+
 	trace2_region_enter("pack-objects", "path-walk", revs->repo);
 	result = walk_objects_by_path(&info);
 	trace2_region_leave("pack-objects", "path-walk", revs->repo);
