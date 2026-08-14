@@ -1713,6 +1713,7 @@ static int want_found_object(const struct object_id *oid, int exclude,
 }
 
 static int want_object_in_pack_one(struct packed_git *p,
+				   off_t known_offset,
 				   const struct object_id *oid,
 				   int exclude,
 				   struct packed_git **found_pack,
@@ -1723,6 +1724,8 @@ static int want_object_in_pack_one(struct packed_git *p,
 
 	if (p == *found_pack)
 		offset = *found_offset;
+	else if (known_offset)
+		offset = known_offset;
 	else
 		offset = find_pack_entry_one(oid, p);
 
@@ -1791,7 +1794,7 @@ static int want_object_in_pack_mtime(const struct object_id *oid,
 		struct pack_entry e;
 
 		if (m && midx_fill_entry(m, oid, &e, NULL) == MIDX_FILL_HIT) {
-			want = want_object_in_pack_one(e.p, oid, exclude, found_pack, found_offset, found_mtime);
+			want = want_object_in_pack_one(e.p, e.offset, oid, exclude, found_pack, found_offset, found_mtime);
 			if (want != -1)
 				return want;
 		}
@@ -1802,7 +1805,7 @@ static int want_object_in_pack_mtime(const struct object_id *oid,
 
 		for (e = files->packed->packs.head; e; e = e->next) {
 			struct packed_git *p = e->pack;
-			want = want_object_in_pack_one(p, oid, exclude, found_pack, found_offset, found_mtime);
+			want = want_object_in_pack_one(p, 0, oid, exclude, found_pack, found_offset, found_mtime);
 			if (!exclude && want > 0)
 				packfile_list_prepend(&files->packed->packs, p);
 			if (want != -1)
