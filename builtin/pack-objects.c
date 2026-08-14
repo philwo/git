@@ -3655,9 +3655,14 @@ static void prepare_pack(int window, int depth)
 	if (!to_pack.nr_objects || !window || !depth)
 		return;
 
-	if (path_walk)
+	if (path_walk) {
+		trace2_region_enter("pack-objects", "deltas-by-region", the_repository);
 		ll_find_deltas_by_region(to_pack.objects, to_pack.regions,
 					 0, to_pack.nr_regions);
+		trace2_data_intmax("pack-objects", the_repository,
+				   "deltas-by-region/regions", to_pack.nr_regions);
+		trace2_region_leave("pack-objects", "deltas-by-region", the_repository);
+	}
 
 	ALLOC_ARRAY(delta_list, to_pack.nr_objects);
 	nr_deltas = n = 0;
@@ -3681,8 +3686,12 @@ static void prepare_pack(int window, int depth)
 			progress_state = start_progress(the_repository,
 							_("Compressing objects"),
 							nr_deltas);
+		trace2_region_enter("pack-objects", "deltas-global", the_repository);
 		QSORT(delta_list, n, type_size_sort);
 		ll_find_deltas(delta_list, n, window+1, depth, &nr_done);
+		trace2_data_intmax("pack-objects", the_repository,
+				   "deltas-global/objects", n);
+		trace2_region_leave("pack-objects", "deltas-global", the_repository);
 		stop_progress(&progress_state);
 		if (nr_done != nr_deltas)
 			die(_("inconsistency with delta count"));
