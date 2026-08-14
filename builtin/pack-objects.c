@@ -260,8 +260,8 @@ static int exclude_promisor_objects_best_effort;
 
 static int use_delta_islands;
 
-static unsigned long delta_cache_size = 0;
-static unsigned long max_delta_cache_size = DEFAULT_DELTA_CACHE_SIZE;
+static size_t delta_cache_size = 0;
+static size_t max_delta_cache_size = DEFAULT_DELTA_CACHE_SIZE;
 static unsigned long cache_max_small_delta_size = 1000;
 
 static unsigned long window_memory_limit = 0;
@@ -3684,7 +3684,19 @@ static int git_pack_config(const char *k, const char *v,
 		return 0;
 	}
 	if (!strcmp(k, "pack.deltacachesize")) {
-		max_delta_cache_size = git_config_int(k, v, ctx->kvi);
+		ssize_t size = git_config_ssize_t(k, v, ctx->kvi);
+
+		/*
+		 * max_delta_cache_size is a size_t: a narrower read caps
+		 * the delta cache far below what a large repack needs,
+		 * already at 2 GiB for an int and at 4 GiB for a 32-bit
+		 * unsigned long. Deltas that do not fit are recomputed
+		 * during the write phase.
+		 */
+		if (size < 0)
+			die(_("bad pack.deltaCacheSize value: %"PRIdMAX),
+			    (intmax_t)size);
+		max_delta_cache_size = size;
 		return 0;
 	}
 	if (!strcmp(k, "pack.deltacachelimit")) {

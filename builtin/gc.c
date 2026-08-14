@@ -140,7 +140,7 @@ struct gc_config {
 	char *repack_filter_to;
 	char *repack_expire_to;
 	unsigned long big_pack_threshold;
-	unsigned long max_delta_cache_size;
+	size_t max_delta_cache_size;
 	/*
 	 * Remove this member from gc_config once repo_settings is passed
 	 * through the callchain.
@@ -214,7 +214,17 @@ static void gc_config(struct gc_config *cfg)
 	}
 
 	repo_config_get_ulong(the_repository, "gc.bigpackthreshold", &cfg->big_pack_threshold);
-	repo_config_get_ulong(the_repository, "pack.deltacachesize", &cfg->max_delta_cache_size);
+
+	/*
+	 * A size_t read keeps values past 4 GiB working on platforms
+	 * where unsigned long has 32 bits.
+	 */
+	if (!repo_config_get_value(the_repository, "pack.deltacachesize", &value)) {
+		ssize_t size;
+
+		if (value && git_parse_ssize_t(value, &size) && size > 0)
+			cfg->max_delta_cache_size = size;
+	}
 
 	if (!repo_config_get_ulong(the_repository, "core.deltabasecachelimit", &ulongval))
 		cfg->delta_base_cache_limit = ulongval;
