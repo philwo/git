@@ -1537,6 +1537,18 @@ static void *cache_or_unpack_entry(struct repository *r, struct packed_git *p,
 	return xmemdupz(ent->data, ent->size);
 }
 
+void *packed_read_object(struct repository *r, struct packed_git *p,
+			 off_t obj_offset, enum object_type *type,
+			 size_t *sizep)
+{
+	void *data;
+
+	obj_read_lock();
+	data = cache_or_unpack_entry(r, p, obj_offset, sizep, type);
+	obj_read_unlock();
+	return data;
+}
+
 static inline void release_delta_base_cache(struct delta_base_cache_entry *ent)
 {
 	free(ent->data);

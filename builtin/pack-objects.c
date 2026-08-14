@@ -352,6 +352,9 @@ static void index_commit_for_bitmap(struct commit *commit)
 	indexed_commits[indexed_commits_nr++] = commit;
 }
 
+static void *read_entry_data(struct object_entry *entry,
+			     enum object_type *type, size_t *sizep);
+
 static void *get_delta(struct object_entry *entry)
 {
 	unsigned long size, base_size, delta_size;
@@ -359,14 +362,11 @@ static void *get_delta(struct object_entry *entry)
 	enum object_type type;
 	size_t size_st = 0, base_size_st = 0;
 
-	buf = odb_read_object(the_repository->objects, &entry->idx.oid,
-			      &type, &size_st);
+	buf = read_entry_data(entry, &type, &size_st);
 	size = cast_size_t_to_ulong(size_st);
 	if (!buf)
 		die(_("unable to read %s"), oid_to_hex(&entry->idx.oid));
-	base_buf = odb_read_object(the_repository->objects,
-				   &DELTA(entry)->idx.oid, &type,
-				   &base_size_st);
+	base_buf = read_entry_data(DELTA(entry), &type, &base_size_st);
 	base_size = cast_size_t_to_ulong(base_size_st);
 	if (!base_buf)
 		die("unable to read %s",
@@ -581,8 +581,7 @@ static void write_prep_produce(struct object_entry *e, unsigned is_delta,
 		enum object_type type;
 		size_t size_st = 0;
 
-		buf = odb_read_object(the_repository->objects, &e->idx.oid,
-				      &type, &size_st);
+		buf = read_entry_data(e, &type, &size_st);
 		if (!buf)
 			die(_("unable to read %s"), oid_to_hex(&e->idx.oid));
 		size = cast_size_t_to_ulong(size_st);
@@ -3232,6 +3231,27 @@ size_t oe_get_size_slow(struct packing_data *pack,
 	return size;
 }
 
+/*
+ * Read an object's data. When the on-disk location is already
+ * recorded in the entry, read straight from that pack and skip the
+ * oid lookup; fall back to the object database on failure, which may
+ * find another copy when the pack copy is corrupt.
+ */
+static void *read_entry_data(struct object_entry *entry,
+			     enum object_type *type, size_t *sizep)
+{
+	struct packed_git *p = IN_PACK(entry);
+	void *data = NULL;
+
+	if (p)
+		data = packed_read_object(the_repository, p,
+					  entry->in_pack_offset, type, sizep);
+	if (!data)
+		data = odb_read_object(the_repository->objects,
+				       &entry->idx.oid, type, sizep);
+	return data;
+}
+
 static int try_delta(struct unpacked *trg, struct unpacked *src,
 		     unsigned max_depth, unsigned long *mem_usage)
 {
@@ -3291,10 +3311,8 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 	/* Load data if not already done */
 	if (!trg->data) {
 		size_t sz_st = 0;
-		/* odb_read_object() does its own locking. */
-		trg->data = odb_read_object(the_repository->objects,
-					    &trg_entry->idx.oid, &type,
-					    &sz_st);
+		/* read_entry_data() does its own locking. */
+		trg->data = read_entry_data(trg_entry, &type, &sz_st);
 		sz = cast_size_t_to_ulong(sz_st);
 		if (!trg->data)
 			die(_("object %s cannot be read"),
@@ -3307,10 +3325,8 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 	}
 	if (!src->data) {
 		size_t sz_st = 0;
-		/* odb_read_object() does its own locking. */
-		src->data = odb_read_object(the_repository->objects,
-					    &src_entry->idx.oid, &type,
-					    &sz_st);
+		/* read_entry_data() does its own locking. */
+		src->data = read_entry_data(src_entry, &type, &sz_st);
 		sz = cast_size_t_to_ulong(sz_st);
 		if (!src->data) {
 			if (src_entry->preferred_base) {
