@@ -306,6 +306,16 @@ int packfile_fill_entry(struct packed_git *p,
 int is_pack_valid(struct packed_git *);
 void *unpack_entry(struct repository *r, struct packed_git *, off_t,
 		   enum object_type *, size_t *);
+
+/*
+ * Read the object at the given offset through the delta base cache,
+ * taking the object read lock itself. Returns NULL on any failure;
+ * the caller is expected to retry through the object database, which
+ * may find another copy.
+ */
+void *packed_read_object(struct repository *r, struct packed_git *p,
+			 off_t obj_offset, enum object_type *type,
+			 size_t *sizep);
 size_t unpack_object_header_buffer(const unsigned char *buf, size_t len,
 				   enum object_type *type, size_t *sizep);
 size_t get_size_from_delta(struct packed_git *, struct pack_window **, off_t);
