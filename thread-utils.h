@@ -22,6 +22,7 @@
 
 #define pthread_mutex_init(mutex, attr) dummy_pthread_init(mutex)
 #define pthread_mutex_lock(mutex)
+#define pthread_mutex_trylock(mutex) 0
 #define pthread_mutex_unlock(mutex)
 #define pthread_mutex_destroy(mutex)
 

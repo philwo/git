@@ -510,6 +510,30 @@ int odb_has_alternates(struct object_database *odb)
 int obj_read_use_lock = 0;
 pthread_mutex_t obj_read_mutex;
 
+#if defined(__x86_64__) || defined(__i386__)
+#define obj_read_spin_relax() __asm__ __volatile__("pause")
+#else
+#define obj_read_spin_relax() do { } while (0)
+#endif
+
+/*
+ * The lock is only held for microseconds at a time and is dropped
+ * around zlib inflation. With many reader threads, parking every
+ * waiter in the kernel costs more than the critical sections
+ * themselves, so spin briefly first.
+ */
+#define OBJ_READ_SPIN_ROUNDS 256
+
+void obj_read_lock_contended(void)
+{
+	for (int i = 0; i < OBJ_READ_SPIN_ROUNDS; i++) {
+		obj_read_spin_relax();
+		if (!pthread_mutex_trylock(&obj_read_mutex))
+			return;
+	}
+	pthread_mutex_lock(&obj_read_mutex);
+}
+
 void enable_obj_read_lock(void)
 {
 	if (obj_read_use_lock)

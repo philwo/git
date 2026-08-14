@@ -400,10 +400,13 @@ void disable_obj_read_lock(void);
 extern int obj_read_use_lock;
 extern pthread_mutex_t obj_read_mutex;
 
+/* Spins briefly before sleeping on the mutex; see odb.c for the tuning. */
+void obj_read_lock_contended(void);
+
 static inline void obj_read_lock(void)
 {
-	if(obj_read_use_lock)
-		pthread_mutex_lock(&obj_read_mutex);
+	if (obj_read_use_lock && pthread_mutex_trylock(&obj_read_mutex))
+		obj_read_lock_contended();
 }
 
 static inline void obj_read_unlock(void)
