@@ -31,6 +31,7 @@ struct type_and_oid_list {
 	enum object_type type;
 	struct oid_array oids;
 	int maybe_interesting;
+	int pushed;
 };
 
 #define TYPE_AND_OID_LIST_INIT { \
@@ -61,11 +62,10 @@ struct path_walk_context {
 	 * other sort is made, so within each object type it acts
 	 * like a stack and performs a DFS within the trees.
 	 *
-	 * Use path_stack_pushed to indicate whether a path
-	 * was previously added to path_stack.
+	 * A list's 'pushed' flag records whether its path was
+	 * previously added to path_stack.
 	 */
 	struct prio_queue path_stack;
-	struct strset path_stack_pushed;
 
 	unsigned exact_pathspecs:1;
 };
@@ -110,29 +110,25 @@ static int compare_by_type(const void *one, const void *two,
 }
 
 static void push_to_stack(struct path_walk_context *ctx,
-			  const char *path)
+			  const char *path,
+			  struct type_and_oid_list *list)
 {
 	struct queued_path *qp;
-	struct type_and_oid_list *list;
 
-	if (strset_contains(&ctx->path_stack_pushed, path))
+	if (list->pushed)
 		return;
+	list->pushed = 1;
 
-	list = strmap_get(&ctx->paths_to_lists, path);
-	if (!list)
-		BUG("pushed path '%s' without a list", path);
-
-	strset_add(&ctx->path_stack_pushed, path);
 	FLEX_ALLOC_STR(qp, path, path);
 	qp->type = list->type;
 	prio_queue_put(&ctx->path_stack, qp);
 }
 
-static void add_path_to_list(struct path_walk_context *ctx,
-			     const char *path,
-			     enum object_type type,
-			     struct object_id *oid,
-			     int interesting)
+static struct type_and_oid_list *add_path_to_list(struct path_walk_context *ctx,
+						  const char *path,
+						  enum object_type type,
+						  struct object_id *oid,
+						  int interesting)
 {
 	struct type_and_oid_list *list = strmap_get(&ctx->paths_to_lists, path);
 
@@ -144,6 +140,7 @@ static void add_path_to_list(struct path_walk_context *ctx,
 
 	list->maybe_interesting |= interesting;
 	oid_array_append(&list->oids, oid);
+	return list;
 }
 
 static int add_tree_entries(struct path_walk_context *ctx,
@@ -171,6 +168,7 @@ static int add_tree_entries(struct path_walk_context *ctx,
 	init_tree_desc(&desc, &tree->object.oid, tree->buffer, tree->size);
 	while (tree_entry(&desc, &entry)) {
 		struct object *o;
+		struct type_and_oid_list *list;
 		/* Not actually true, but we will ignore submodules later. */
 		enum object_type type = S_ISDIR(entry.mode) ? OBJ_TREE : OBJ_BLOB;
 
@@ -233,10 +231,10 @@ static int add_tree_entries(struct path_walk_context *ctx,
 							      ctx->info->pl,
 							      ctx->repo->index);
 				if (m != NOT_MATCHED) {
-					add_path_to_list(ctx, path.buf, type,
-							 &entry.oid,
-							 !(o->flags & UNINTERESTING));
-					push_to_stack(ctx, path.buf);
+					list = add_path_to_list(ctx, path.buf,
+								type, &entry.oid,
+								!(o->flags & UNINTERESTING));
+					push_to_stack(ctx, path.buf, list);
 				}
 			}
 			continue;
@@ -288,10 +286,10 @@ static int add_tree_entries(struct path_walk_context *ctx,
 		}
 
 		o->flags |= SEEN;
-		add_path_to_list(ctx, path.buf, type, &entry.oid,
-				 !(o->flags & UNINTERESTING));
+		list = add_path_to_list(ctx, path.buf, type, &entry.oid,
+					!(o->flags & UNINTERESTING));
 
-		push_to_stack(ctx, path.buf);
+		push_to_stack(ctx, path.buf, list);
 	}
 
 	free_tree_buffer(tree);
@@ -554,7 +552,7 @@ static int setup_pending_objects(struct path_walk_info *info,
 			tagged_blobs->type = OBJ_BLOB;
 			tagged_blobs->maybe_interesting = 1;
 			strmap_put(&ctx->paths_to_lists, tagged_blob_path, tagged_blobs);
-			push_to_stack(ctx, tagged_blob_path);
+			push_to_stack(ctx, tagged_blob_path, tagged_blobs);
 		} else {
 			oid_array_clear(&tagged_blobs->oids);
 			free(tagged_blobs);
@@ -566,7 +564,7 @@ static int setup_pending_objects(struct path_walk_info *info,
 			tagged_trees->type = OBJ_TREE;
 			tagged_trees->maybe_interesting = 1;
 			strmap_put(&ctx->paths_to_lists, tagged_tree_path, tagged_trees);
-			push_to_stack(ctx, tagged_tree_path);
+			push_to_stack(ctx, tagged_tree_path, tagged_trees);
 		} else {
 			oid_array_clear(&tagged_trees->oids);
 			free(tagged_trees);
@@ -578,7 +576,7 @@ static int setup_pending_objects(struct path_walk_info *info,
 			tags->type = OBJ_TAG;
 			tags->maybe_interesting = 1;
 			strmap_put(&ctx->paths_to_lists, tag_path, tags);
-			push_to_stack(ctx, tag_path);
+			push_to_stack(ctx, tag_path, tags);
 		} else {
 			oid_array_clear(&tags->oids);
 			free(tags);
@@ -726,7 +724,6 @@ int walk_objects_by_path(struct path_walk_info *info)
 			.compare = compare_by_type,
 			.cb_data = &ctx
 		},
-		.path_stack_pushed = STRSET_INIT,
 		.paths_to_lists = STRMAP_INIT
 	};
 
@@ -752,7 +749,7 @@ int walk_objects_by_path(struct path_walk_info *info)
 	root_tree_list->type = OBJ_TREE;
 	root_tree_list->maybe_interesting = 1;
 	strmap_put(&ctx.paths_to_lists, root_path, root_tree_list);
-	push_to_stack(&ctx, root_path);
+	push_to_stack(&ctx, root_path, root_tree_list);
 
 	/*
 	 * Ensure that prepare_revision_walk() keeps all pending objects
@@ -840,7 +837,7 @@ int walk_objects_by_path(struct path_walk_info *info)
 		struct strmap_entry *entry;
 
 		strmap_for_each_entry(&ctx.paths_to_lists, &iter, entry)
-			push_to_stack(&ctx, entry->key);
+			push_to_stack(&ctx, entry->key, entry->value);
 
 		while (!ret && ctx.path_stack.nr) {
 			struct queued_path *qp = prio_queue_get(&ctx.path_stack);
@@ -856,7 +853,6 @@ int walk_objects_by_path(struct path_walk_info *info)
 	trace2_region_leave("path-walk", "path-walk", info->revs->repo);
 
 	clear_paths_to_lists(&ctx.paths_to_lists);
-	strset_clear(&ctx.path_stack_pushed);
 	clear_prio_queue(&ctx.path_stack);
 	return ret;
 }
