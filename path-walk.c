@@ -70,32 +70,40 @@ struct path_walk_context {
 	unsigned exact_pathspecs:1;
 };
 
-static int compare_by_type(const void *one, const void *two, void *cb_data)
-{
-	struct type_and_oid_list *list1, *list2;
-	const char *str1 = one;
-	const char *str2 = two;
-	struct path_walk_context *ctx = cb_data;
+/*
+ * A queued path and the object type of its list. The type is recorded
+ * when the path is pushed so that the comparator does not need to look
+ * the path up in paths_to_lists on every heap comparison. A path's list
+ * always exists before the path is pushed and its type never changes
+ * while the path is queued.
+ */
+struct queued_path {
+	enum object_type type;
+	char path[FLEX_ARRAY];
+};
 
-	list1 = strmap_get(&ctx->paths_to_lists, str1);
-	list2 = strmap_get(&ctx->paths_to_lists, str2);
+static int compare_by_type(const void *one, const void *two,
+			   void *cb_data UNUSED)
+{
+	const struct queued_path *qp1 = one;
+	const struct queued_path *qp2 = two;
 
 	/*
 	 * If object types are equal, then use path comparison.
 	 */
-	if (!list1 || !list2 || list1->type == list2->type)
-		return strcmp(str1, str2);
+	if (qp1->type == qp2->type)
+		return strcmp(qp1->path, qp2->path);
 
 	/* Prefer tags to be popped off first. */
-	if (list1->type == OBJ_TAG)
+	if (qp1->type == OBJ_TAG)
 		return -1;
-	if (list2->type == OBJ_TAG)
+	if (qp2->type == OBJ_TAG)
 		return 1;
 
 	/* Prefer blobs to be popped off second. */
-	if (list1->type == OBJ_BLOB)
+	if (qp1->type == OBJ_BLOB)
 		return -1;
-	if (list2->type == OBJ_BLOB)
+	if (qp2->type == OBJ_BLOB)
 		return 1;
 
 	return 0;
@@ -104,11 +112,20 @@ static int compare_by_type(const void *one, const void *two, void *cb_data)
 static void push_to_stack(struct path_walk_context *ctx,
 			  const char *path)
 {
+	struct queued_path *qp;
+	struct type_and_oid_list *list;
+
 	if (strset_contains(&ctx->path_stack_pushed, path))
 		return;
 
+	list = strmap_get(&ctx->paths_to_lists, path);
+	if (!list)
+		BUG("pushed path '%s' without a list", path);
+
 	strset_add(&ctx->path_stack_pushed, path);
-	prio_queue_put(&ctx->path_stack, xstrdup(path));
+	FLEX_ALLOC_STR(qp, path, path);
+	qp->type = list->type;
+	prio_queue_put(&ctx->path_stack, qp);
 }
 
 static void add_path_to_list(struct path_walk_context *ctx,
@@ -809,12 +826,12 @@ int walk_objects_by_path(struct path_walk_info *info)
 
 	trace2_region_enter("path-walk", "path-walk", info->revs->repo);
 	while (!ret && ctx.path_stack.nr) {
-		char *path = prio_queue_get(&ctx.path_stack);
+		struct queued_path *qp = prio_queue_get(&ctx.path_stack);
 		paths_nr++;
 
-		ret = walk_path(&ctx, path);
+		ret = walk_path(&ctx, qp->path);
 
-		free(path);
+		free(qp);
 	}
 
 	/* Are there paths remaining? Likely they are from indexed objects. */
@@ -826,12 +843,12 @@ int walk_objects_by_path(struct path_walk_info *info)
 			push_to_stack(&ctx, entry->key);
 
 		while (!ret && ctx.path_stack.nr) {
-			char *path = prio_queue_get(&ctx.path_stack);
+			struct queued_path *qp = prio_queue_get(&ctx.path_stack);
 			paths_nr++;
 
-			ret = walk_path(&ctx, path);
+			ret = walk_path(&ctx, qp->path);
 
-			free(path);
+			free(qp);
 		}
 	}
 
