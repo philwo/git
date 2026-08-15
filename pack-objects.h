@@ -127,8 +127,12 @@ struct object_entry {
 struct packing_region {
 	size_t start;
 	size_t nr;
-	/* Total object bytes in the region, as a work estimate. */
-	size_t weight;
+	/*
+	 * Total object bytes in the region, as a work estimate. The
+	 * per-object cost floor overflows a 32-bit size_t already at a
+	 * quarter million objects, so keep the weight 64-bit.
+	 */
+	uintmax_t weight;
 };
 
 struct packing_data {
