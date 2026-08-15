@@ -66,6 +66,42 @@ static inline struct object_entry *oe_delta(
 		return &pack->objects[e->delta_idx - 1];
 }
 
+/*
+ * The stitch pass (see stitch_region_leftovers) previews delta chains
+ * without holding stitch_mutex while other jobs commit new bases under
+ * it. These relaxed variants make those racing accesses defined; the
+ * generated code is a plain load and store. Compilers without the
+ * builtins run the stitch pass on a single thread, so their plain
+ * accesses never race.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#define HAVE_RELAXED_ATOMICS 1
+#define load_relaxed(ptr) __atomic_load_n(ptr, __ATOMIC_RELAXED)
+#define store_relaxed(ptr, val) __atomic_store_n(ptr, val, __ATOMIC_RELAXED)
+#else
+#define HAVE_RELAXED_ATOMICS 0
+#define load_relaxed(ptr) (*(ptr))
+#define store_relaxed(ptr, val) (*(ptr) = (val))
+#endif
+
+/*
+ * Chain-walk variant of oe_delta() for the stitch pass. ext_base is
+ * never written during the stitch, so its read stays plain.
+ */
+static inline struct object_entry *oe_delta_relaxed(
+		const struct packing_data *pack,
+		const struct object_entry *e)
+{
+	uint32_t delta_idx = load_relaxed(&e->delta_idx);
+
+	if (!delta_idx)
+		return NULL;
+	if (e->ext_base)
+		return &pack->ext_bases[delta_idx - 1];
+	else
+		return &pack->objects[delta_idx - 1];
+}
+
 static inline size_t oe_delta_size(struct packing_data *pack,
 				   const struct object_entry *e)
 {
@@ -103,6 +139,15 @@ static inline void oe_set_delta(struct packing_data *pack,
 		e->delta_idx = (delta - pack->objects) + 1;
 	else
 		e->delta_idx = 0;
+}
+
+/* Commit-side counterpart of oe_delta_relaxed() for the stitch pass. */
+static inline void oe_set_delta_relaxed(struct packing_data *pack,
+					struct object_entry *e,
+					struct object_entry *delta)
+{
+	store_relaxed(&e->delta_idx,
+		      delta ? (uint32_t)((delta - pack->objects) + 1) : 0);
 }
 
 static inline struct object_entry *oe_delta_sibling(
@@ -3252,6 +3297,29 @@ static void *read_entry_data(struct object_entry *entry,
 	return data;
 }
 
+/*
+ * The stitch pass (see stitch_region_leftovers) searches delta-less
+ * entries against candidates that carry chains from the region pass.
+ * Such a chain can end at the target (the target may have dependents),
+ * so choosing that source would close a cycle; the checks in try_delta
+ * are gated on this flag to keep them off the regular hot paths. New
+ * bases are committed under stitch_mutex, so that two jobs whose chains
+ * interleave cannot each pass the cycle check and then close a cycle
+ * together.
+ */
+static int stitch_in_progress;
+static pthread_mutex_t stitch_mutex;
+
+/*
+ * Longest chain ending at each entry, indexed by to_pack position. The
+ * stitch pass may not deepen the chain of anything that already depends
+ * on a target past --depth: commits check the target's height and
+ * maintain the height of the new chain's terminator, both under
+ * stitch_mutex. Chains only ever grow at delta-less entries, so keeping
+ * terminators current is enough.
+ */
+static uint16_t *stitch_chain_height;
+
 static int try_delta(struct unpacked *trg, struct unpacked *src,
 		     unsigned max_depth, unsigned long *mem_usage)
 {
@@ -3284,6 +3352,42 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 	/* Let's not bust the allowed depth. */
 	if (src->depth >= max_depth)
 		return 0;
+
+	/*
+	 * A stitch source carries its chain from the region pass, and that
+	 * chain may end at the target: the target is delta-less, but it can
+	 * have dependents. Basing the target on such a source would close a
+	 * delta cycle. (DELTA_CHILD links are only maintained for reused
+	 * deltas, so they cannot tell us whether the target has dependents -
+	 * always walk the chain.)
+	 */
+	if (stitch_in_progress) {
+		struct object_entry *base;
+		unsigned int nodes = 0;
+
+		/*
+		 * This walk runs without stitch_mutex while other jobs
+		 * commit new bases under it, hence the relaxed chain
+		 * reads; the locked walk at commit time re-checks.
+		 */
+		for (base = src_entry; base; base = oe_delta_relaxed(&to_pack, base)) {
+			if (base == trg_entry)
+				return 0;
+			/* An external base has no height slot; do not follow. */
+			if (base->ext_base)
+				return 0;
+			nodes++;
+		}
+		/*
+		 * An unlocked preview of the depth budget checked again at
+		 * commit time: heights only grow, so a stale read can only
+		 * let through what the locked re-check still rejects. This
+		 * prunes hopeless candidates before their data is loaded.
+		 */
+		if (load_relaxed(&stitch_chain_height[trg_entry - to_pack.objects]) +
+		    nodes > max_depth)
+			return 0;
+	}
 
 	/* Now some size filtering heuristics. */
 	trg_size = SIZE(trg_entry);
@@ -3376,6 +3480,65 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 	}
 
 	/*
+	 * Commit the new base under one lock, re-checking the chain: the
+	 * early check above ran unlocked, and a concurrent job may have
+	 * extended this chain since. Evict a delta cached earlier in this
+	 * window loop first, while DELTA_SIZE still holds the size it was
+	 * accounted at.
+	 */
+	if (stitch_in_progress) {
+		struct object_entry *base, *terminator = NULL;
+		unsigned int src_real_depth = 0, new_height;
+
+		if (trg_entry->delta_data) {
+			free(trg_entry->delta_data);
+			trg_entry->delta_data = NULL;
+			cache_lock();
+			delta_cache_size -= DELTA_SIZE(trg_entry);
+			cache_unlock();
+		}
+		pthread_mutex_lock(&stitch_mutex);
+		for (base = src_entry; base; base = DELTA(base)) {
+			if (base == trg_entry)
+				break;
+			/* An external base has no height slot; bail out. */
+			if (base->ext_base) {
+				pthread_mutex_unlock(&stitch_mutex);
+				free(delta_buf);
+				return 0;
+			}
+			terminator = base;
+			src_real_depth++;
+		}
+		/*
+		 * The source's chain may have grown since it entered the
+		 * window; this fresh walk keeps a concurrent job's commit
+		 * from pushing the new chain past the depth budget. The
+		 * target's height covers everything that depends on it,
+		 * so the deepest chain through the target stays in budget
+		 * as well.
+		 */
+		new_height = stitch_chain_height[trg_entry - to_pack.objects] +
+			     src_real_depth;
+		if (base || new_height > max_depth) {
+			pthread_mutex_unlock(&stitch_mutex);
+			free(delta_buf);
+			return 0;
+		}
+		/*
+		 * Other jobs preview this chain and these heights
+		 * without the lock; store both with relaxed atomics.
+		 */
+		oe_set_delta_relaxed(&to_pack, trg_entry, src_entry);
+		SET_DELTA_SIZE(trg_entry, delta_size);
+		if (new_height >
+		    stitch_chain_height[terminator - to_pack.objects])
+			store_relaxed(&stitch_chain_height[terminator - to_pack.objects],
+				      new_height);
+		pthread_mutex_unlock(&stitch_mutex);
+	}
+
+	/*
 	 * Handle memory allocation outside of the cache
 	 * accounting lock.  Compiler will optimize the strangeness
 	 * away when NO_PTHREADS is defined.
@@ -3395,8 +3558,10 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 		free(delta_buf);
 	}
 
-	SET_DELTA(trg_entry, src_entry);
-	SET_DELTA_SIZE(trg_entry, delta_size);
+	if (!stitch_in_progress) {
+		SET_DELTA(trg_entry, src_entry);
+		SET_DELTA_SIZE(trg_entry, delta_size);
+	}
 	trg->depth = src->depth + 1;
 
 	return 1;
@@ -3459,6 +3624,22 @@ static void find_deltas(struct object_entry **list, unsigned *list_size,
 		mem_usage -= free_unpacked(n);
 		n->entry = entry;
 
+		/*
+		 * A stitched entry can enter the window with a chain from the
+		 * region pass. Record that chain's real depth so that using
+		 * the entry as a base respects --depth. Other stitch jobs can
+		 * extend chains this walk passes through, so it must use the
+		 * relaxed chain reads.
+		 */
+		if (stitch_in_progress) {
+			struct object_entry *base =
+				oe_delta_relaxed(&to_pack, entry);
+
+			n->depth = 0;
+			for (; base; base = oe_delta_relaxed(&to_pack, base))
+				n->depth++;
+		}
+
 		while (window_memory_limit &&
 		       mem_usage > window_memory_limit &&
 		       count > 1) {
@@ -3466,6 +3647,14 @@ static void find_deltas(struct object_entry **list, unsigned *list_size,
 			mem_usage -= free_unpacked(array + tail);
 			count--;
 		}
+
+		/*
+		 * The stitch pass only searches entries that ended the region
+		 * pass without a delta; everything else in its list is there
+		 * to serve as a window candidate for them.
+		 */
+		if (stitch_in_progress && DELTA(entry))
+			goto next;
 
 		/* We do not compute delta to *create* objects we are not
 		 * going to pack.
@@ -4148,6 +4337,305 @@ static void ll_find_deltas_by_region(struct object_entry *list,
 	stop_progress(&progress_state);
 }
 
+static int stitch_candidate_ok(struct object_entry *entry)
+{
+	if (!entry->type_valid ||
+	    oe_size_less_than(&to_pack, entry, 50))
+		return 0;
+	if (entry->no_try_delta || entry->preferred_base)
+		return 0;
+	return 1;
+}
+
+static size_t stitch_unit_of(struct packing_region *units, size_t nr_units,
+			     size_t obj_idx)
+{
+	size_t lo = 0, hi = nr_units;
+
+	while (lo + 1 < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+
+		if (units[mid].start <= obj_idx)
+			lo = mid;
+		else
+			hi = mid;
+	}
+	return lo;
+}
+
+/*
+ * Unit splitting searches a heavy region in walk-order chunks, which keeps
+ * neighboring versions together but hides versions that are far apart in
+ * the walk yet nearly identical in content (reverts, files regenerated on
+ * a schedule). Give every object that ended the region pass without a
+ * delta a second chance: search it against its closest size neighbors
+ * from the whole region, the same candidates a whole-region search would
+ * have put in its window. Entries that already carry a delta only serve
+ * as candidates; their own deltas are left alone.
+ */
+struct stitch_job {
+	struct object_entry **list;
+	unsigned int nr;
+	uintmax_t weight;
+};
+
+static struct stitch_job *stitch_jobs;
+static size_t stitch_jobs_nr, stitch_jobs_cursor;
+static unsigned int stitch_processed;
+
+static int stitch_job_weight_desc(const void *a_, const void *b_)
+{
+	const struct stitch_job *a = a_;
+	const struct stitch_job *b = b_;
+
+	if (a->weight > b->weight)
+		return -1;
+	if (a->weight < b->weight)
+		return 1;
+	return 0;
+}
+
+static void stitch_flush_span(struct object_entry **region_list,
+			      unsigned int a, unsigned int b,
+			      size_t *jobs_alloc)
+{
+	struct stitch_job *job;
+
+	if (b - a < 2)
+		return;
+	ALLOC_GROW(stitch_jobs, stitch_jobs_nr + 1, *jobs_alloc);
+	job = &stitch_jobs[stitch_jobs_nr++];
+	job->nr = b - a;
+	job->weight = 0;
+	ALLOC_ARRAY(job->list, job->nr);
+	COPY_ARRAY(job->list, region_list + a, job->nr);
+	for (unsigned int i = 0; i < job->nr; i++)
+		job->weight += region_entry_weight(job->list[i]);
+}
+
+static void *stitch_thread(void *arg UNUSED)
+{
+	for (;;) {
+		struct stitch_job *job;
+
+		progress_lock();
+		if (stitch_jobs_cursor >= stitch_jobs_nr) {
+			progress_unlock();
+			break;
+		}
+		job = &stitch_jobs[stitch_jobs_cursor++];
+		progress_unlock();
+
+		find_deltas(job->list, &job->nr, window, depth,
+			    &stitch_processed);
+	}
+	return NULL;
+}
+
+static void stitch_region_leftovers(void)
+{
+	struct object_entry **region_list = NULL;
+	struct packing_region *units;
+	struct packing_region **counted = NULL;
+	size_t region_alloc = 0, jobs_alloc = 0, counted_alloc = 0;
+	size_t nr_units = 0, nr_counted = 0;
+	uintmax_t nr_targets = 0, nr_leftovers = 0, nr_still = 0;
+	int nr_threads;
+
+	trace2_region_enter("pack-objects", "deltas-stitch", the_repository);
+	init_threaded_search();
+	pthread_mutex_init(&stitch_mutex, NULL);
+	stitch_in_progress = 1;
+
+	/*
+	 * Rebuild the unit layout the region pass used; the split is a pure
+	 * function of the regions. A leftover is only worth re-searching if
+	 * its size neighborhood reaches into another unit: neighbors in its
+	 * own unit already shared its search window.
+	 */
+	units = split_regions_into_units(to_pack.objects, to_pack.regions,
+					 0, to_pack.nr_regions, &nr_units);
+
+	for (size_t r = 0; r < to_pack.nr_regions; r++) {
+		struct packing_region *region = &to_pack.regions[r];
+		unsigned int region_nr = 0, span_start = 0, span_end = 0;
+		size_t leftovers = 0, jobs_before = stitch_jobs_nr;
+
+		/* A region this small was searched whole; nothing was hidden. */
+		if (region->nr <= (size_t)2 * window)
+			continue;
+
+		/*
+		 * A region holds one path's objects, so its entries share a
+		 * type. Only blob regions have shown recoverable deltas:
+		 * commits and trees delta as well as a whole-region search
+		 * does already.
+		 */
+		if (oe_type(to_pack.objects + region->start) != OBJ_BLOB)
+			continue;
+
+		for (size_t i = 0; i < region->nr; i++) {
+			struct object_entry *e = to_pack.objects + region->start + i;
+
+			if (!stitch_candidate_ok(e))
+				continue;
+			ALLOC_GROW(region_list, region_nr + 1, region_alloc);
+			region_list[region_nr++] = e;
+			if (!DELTA(e))
+				leftovers++;
+		}
+		if (!leftovers || region_nr < 2)
+			continue;
+
+		QSORT(region_list, region_nr, type_size_sort);
+
+		/*
+		 * Collect the size neighborhood of every delta-less entry,
+		 * merging overlapping neighborhoods into spans. Every span
+		 * is a subsequence of the sorted region list and shares no
+		 * entries with any other span, so each one is its own job.
+		 */
+		for (unsigned int i = 0; i < region_nr; i++) {
+			unsigned int a, b, k;
+			size_t target_unit;
+			int cross = 0;
+
+			if (DELTA(region_list[i]))
+				continue;
+			a = i > (unsigned int)window ? i - window : 0;
+			b = i + window + 1 < region_nr ? i + window + 1 : region_nr;
+			target_unit = stitch_unit_of(units, nr_units,
+						     region_list[i] - to_pack.objects);
+			for (k = a; k < b && !cross; k++)
+				if (k != i &&
+				    stitch_unit_of(units, nr_units,
+						   region_list[k] - to_pack.objects) != target_unit)
+					cross = 1;
+			if (!cross)
+				continue;
+			nr_targets++;
+			if (span_end && a <= span_end &&
+			    span_end - span_start < (unsigned int)8 * window) {
+				span_end = b;
+			} else {
+				/*
+				 * Cut long runs of targets into separate
+				 * jobs so one dense region cannot become
+				 * the serial tail of the pass. A target at
+				 * a cut loses its candidates below the cut.
+				 */
+				stitch_flush_span(region_list, span_start,
+						  span_end, &jobs_alloc);
+				span_start = span_end > a ? span_end : a;
+				span_end = b;
+			}
+		}
+		stitch_flush_span(region_list, span_start, span_end,
+				  &jobs_alloc);
+
+		if (stitch_jobs_nr != jobs_before) {
+			ALLOC_GROW(counted, nr_counted + 1, counted_alloc);
+			counted[nr_counted++] = region;
+			nr_leftovers += leftovers;
+		}
+	}
+
+	/*
+	 * Seed the terminator heights from the region pass's chains, for
+	 * every region that has jobs (chains never leave their region).
+	 */
+	CALLOC_ARRAY(stitch_chain_height, to_pack.nr_objects);
+	for (size_t c = 0; c < nr_counted; c++) {
+		struct packing_region *region = counted[c];
+
+		for (size_t i = 0; i < region->nr; i++) {
+			struct object_entry *e =
+				to_pack.objects + region->start + i;
+			struct object_entry *base, *term = NULL;
+			uint16_t links = 0;
+
+			/*
+			 * A chain that ends in an external base has no
+			 * terminator height slot; leave it unseeded like
+			 * the walks in try_delta() do.
+			 */
+			if (e->ext_base)
+				continue;
+			for (base = DELTA(e); base; base = DELTA(base)) {
+				if (base->ext_base) {
+					term = NULL;
+					break;
+				}
+				term = base;
+				links++;
+			}
+			if (term &&
+			    links > stitch_chain_height[term - to_pack.objects])
+				stitch_chain_height[term - to_pack.objects] =
+					links;
+		}
+	}
+
+	/*
+	 * Jobs never share an entry and a job only deltifies entries of one
+	 * region against entries of that same region. Heaviest first, as in
+	 * the region pass, so the big spans cannot become the tail.
+	 */
+	QSORT(stitch_jobs, stitch_jobs_nr, stitch_job_weight_desc);
+	stitch_jobs_cursor = 0;
+	stitch_processed = 0;
+	nr_threads = delta_search_threads < (int)stitch_jobs_nr ?
+		delta_search_threads : (int)stitch_jobs_nr;
+	if (!HAVE_RELAXED_ATOMICS && nr_threads > 1)
+		nr_threads = 1;
+	if (nr_threads > 0) {
+		pthread_t *threads;
+
+		ALLOC_ARRAY(threads, nr_threads);
+		for (int t = 0; t < nr_threads; t++)
+			if (pthread_create(&threads[t], NULL, stitch_thread, NULL))
+				die(_("unable to create thread"));
+		for (int t = 0; t < nr_threads; t++)
+			pthread_join(threads[t], NULL);
+		free(threads);
+	}
+
+	for (size_t c = 0; c < nr_counted; c++) {
+		struct packing_region *region = counted[c];
+
+		for (size_t i = 0; i < region->nr; i++) {
+			struct object_entry *e =
+				to_pack.objects + region->start + i;
+
+			if (stitch_candidate_ok(e) && !DELTA(e))
+				nr_still++;
+		}
+	}
+
+	stitch_in_progress = 0;
+	pthread_mutex_destroy(&stitch_mutex);
+	cleanup_threaded_search();
+	FREE_AND_NULL(stitch_chain_height);
+	free(units);
+	free(region_list);
+	free(counted);
+
+	trace2_data_intmax("pack-objects", the_repository,
+			   "deltas-stitch/regions", nr_counted);
+	trace2_data_intmax("pack-objects", the_repository,
+			   "deltas-stitch/jobs", stitch_jobs_nr);
+	trace2_data_intmax("pack-objects", the_repository,
+			   "deltas-stitch/targets", nr_targets);
+	trace2_data_intmax("pack-objects", the_repository,
+			   "deltas-stitch/rescued", nr_leftovers - nr_still);
+	trace2_region_leave("pack-objects", "deltas-stitch", the_repository);
+
+	for (size_t j = 0; j < stitch_jobs_nr; j++)
+		free(stitch_jobs[j].list);
+	FREE_AND_NULL(stitch_jobs);
+	stitch_jobs_nr = 0;
+}
+
 static void prepare_pack(int window, int depth)
 {
 	struct object_entry **delta_list;
@@ -4179,6 +4667,15 @@ static void prepare_pack(int window, int depth)
 		trace2_data_intmax("pack-objects", the_repository,
 				   "deltas-by-region/regions", to_pack.nr_regions);
 		trace2_region_leave("pack-objects", "deltas-by-region", the_repository);
+
+		/*
+		 * Only a threaded region pass splits regions into units, so
+		 * only there can a good base have been hidden from its
+		 * target. Keeping this out of the serial path also keeps
+		 * --threads=1 packs comparable with the unsplit search.
+		 */
+		if (delta_search_threads > 1)
+			stitch_region_leftovers();
 	}
 
 	ALLOC_ARRAY(delta_list, to_pack.nr_objects);
