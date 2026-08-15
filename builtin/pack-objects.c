@@ -3523,21 +3523,32 @@ static int region_weight_desc(const void *a_, const void *b_)
 	return 0;
 }
 
+/*
+ * A region's delta search costs a window of try_delta calls per object
+ * even when the objects are tiny, so a weight of plain bytes lets a
+ * region of many small objects (most of all the commits, which arrive
+ * as one region) look light and stay unsplit. Charge every object a
+ * flat byte equivalent of that per-call floor on top of its size.
+ */
+#define REGION_OBJECT_COST_BYTES ((uintmax_t)16 << 10)
+
+static uintmax_t region_entry_weight(const struct object_entry *e)
+{
+	uintmax_t weight = e->size_valid ? e->size_ : to_pack.oe_size_limit;
+
+	return weight + REGION_OBJECT_COST_BYTES;
+}
+
 static void compute_region_weights(struct object_entry *list,
 				   struct packing_region *regions,
 				   size_t start, size_t nr)
 {
 	for (size_t i = 0; i < nr; i++) {
 		struct packing_region *region = &regions[start + i];
-		size_t weight = 0;
+		uintmax_t weight = 0;
 
-		for (size_t j = 0; j < region->nr; j++) {
-			struct object_entry *e = list + region->start + j;
-			if (e->size_valid)
-				weight += e->size_;
-			else
-				weight += to_pack.oe_size_limit;
-		}
+		for (size_t j = 0; j < region->nr; j++)
+			weight += region_entry_weight(list + region->start + j);
 		region->weight = weight;
 	}
 }
@@ -3593,7 +3604,7 @@ static struct packing_region *split_regions_into_units(struct object_entry *list
 		min_take = region->nr / want_units;
 		for (size_t u = 0; u < want_units; u++) {
 			struct packing_region *unit;
-			size_t goal = region->weight / want_units;
+			uintmax_t goal = region->weight / want_units;
 			size_t reserved = (want_units - 1 - u) * min_take;
 
 			ALLOC_GROW(units, units_nr + 1, units_alloc);
@@ -3611,8 +3622,7 @@ static struct packing_region *split_regions_into_units(struct object_entry *list
 				    (unit->weight >= goal ||
 				     region->nr - taken_nr <= reserved))
 					break;
-				unit->weight += e->size_valid ?
-					e->size_ : to_pack.oe_size_limit;
+				unit->weight += region_entry_weight(e);
 				unit->nr++;
 				taken_nr++;
 			}
