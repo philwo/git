@@ -373,6 +373,17 @@ create_delta(const struct delta_index *index,
 					ref_size = top - src;
 				if (ref_size <= msize)
 					break;
+				/*
+				 * Extend the match in 8-byte chunks first:
+				 * chunk equality is one load and compare
+				 * instead of eight. The byte loop finishes
+				 * the mismatching chunk and short tails.
+				 */
+				while (ref_size >= 8 && !memcmp(src, ref, 8)) {
+					src += 8;
+					ref += 8;
+					ref_size -= 8;
+				}
 				while (ref_size-- && *src++ == *ref)
 					ref++;
 				if (msize < ref - entry->ptr) {
