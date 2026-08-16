@@ -512,22 +512,34 @@ pthread_mutex_t obj_read_mutex;
 
 #if defined(__x86_64__) || defined(__i386__)
 #define obj_read_spin_relax() __asm__ __volatile__("pause")
+#elif defined(__aarch64__) || \
+	(defined(__arm__) && defined(__ARM_ARCH) && __ARM_ARCH >= 7)
+#define obj_read_spin_relax() __asm__ __volatile__("yield")
 #else
 #define obj_read_spin_relax() do { } while (0)
 #endif
 
 /*
- * The lock is only held for microseconds at a time and is dropped
- * around zlib inflation. With many reader threads, parking every
- * waiter in the kernel costs more than the critical sections
- * themselves, so spin briefly first.
+ * The lock is only held for microseconds at a time. With many reader
+ * threads, parking every waiter in the kernel costs more than the
+ * critical sections themselves, so spin first, long enough to cover a
+ * typical hold such as a whole delta chain copy-out. Relaxing in
+ * growing bursts between trylocks keeps the spin from hammering the
+ * mutex cache line while the holder works.
  */
-#define OBJ_READ_SPIN_ROUNDS 256
+#define OBJ_READ_SPIN_ROUNDS 4096
 
 void obj_read_lock_contended(void)
 {
-	for (int i = 0; i < OBJ_READ_SPIN_ROUNDS; i++) {
-		obj_read_spin_relax();
+	int rounds = OBJ_READ_SPIN_ROUNDS;
+	int burst = 1;
+
+	while (rounds > 0) {
+		for (int i = 0; i < burst; i++)
+			obj_read_spin_relax();
+		rounds -= burst;
+		if (burst < 64)
+			burst *= 2;
 		if (!pthread_mutex_trylock(&obj_read_mutex))
 			return;
 	}
